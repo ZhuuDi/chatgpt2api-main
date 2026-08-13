@@ -1,6 +1,8 @@
 import threading
 import unittest
+from unittest import mock
 
+from services import protocol as protocol_module
 from services.config import config
 from services.protocol.conversation import _remove_image_conversation_later
 
@@ -28,7 +30,12 @@ class RemoveImageConversationGateTests(unittest.TestCase):
             image_remove_conversation_always=always,
         )
         backend = FakeBackend()
-        _remove_image_conversation_later(backend, "conv-1", success=success)
+        # 新签名：传入账号 token，后台线程经 Session 池获取实例执行删除
+        with (
+            mock.patch.object(protocol_module.conversation.backend_pool, "acquire", return_value=backend),
+            mock.patch.object(protocol_module.conversation.backend_pool, "release"),
+        ):
+            _remove_image_conversation_later("fake-token", "conv-1", success=success)
         return backend.called.wait(2.0)
 
     def test_both_off_never_removes(self) -> None:
@@ -46,7 +53,11 @@ class RemoveImageConversationGateTests(unittest.TestCase):
     def test_empty_conversation_id_is_noop(self) -> None:
         config.data = dict(self._saved, image_remove_conversation_always=True)
         backend = FakeBackend()
-        _remove_image_conversation_later(backend, "", success=False)
+        with (
+            mock.patch.object(protocol_module.conversation.backend_pool, "acquire", return_value=backend),
+            mock.patch.object(protocol_module.conversation.backend_pool, "release"),
+        ):
+            _remove_image_conversation_later("fake-token", "", success=False)
         self.assertFalse(backend.called.wait(0.2))
 
 
