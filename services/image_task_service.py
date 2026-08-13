@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -94,6 +95,83 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
         if base_ts:
             item["elapsed_secs"] = round(time.time() - base_ts, 1)
     return item
+
+
+class ImageTaskExecutor:
+    """图片任务执行管理器。
+
+    默认按需创建线程（并发不设上限，由下游调用方控制，代码不写死任何并发数字）；
+    可选 executor_max_workers 配置作为部署期资源保护（启用 ThreadPoolExecutor 时
+    超过容量的任务会排队，属于显式开启的保护行为，默认关闭）。
+    """
+
+    def __init__(self) -> None:
+        self._thread_pool: ThreadPoolExecutor | None = None
+        self._active: set[threading.Thread] = set()
+        self._active_count = 0
+        self._lock = threading.Lock()
+
+    @property
+    def max_workers(self) -> int:
+        return max(0, int(config.executor_max_workers or 0))
+
+    def submit(self, fn: Callable[[], None], *, name: str = "") -> None:
+        """提交一个执行单元。默认直接创建守护线程并启动，不排队。"""
+        workers = self.max_workers
+        if workers > 0:
+            with self._lock:
+                if self._thread_pool is None:
+                    self._thread_pool = ThreadPoolExecutor(
+                        max_workers=workers,
+                        thread_name_prefix="image-task",
+                    )
+                pool = self._thread_pool
+                self._active_count += 1
+            future = pool.submit(fn)
+            future.add_done_callback(lambda _f: self._decrement())
+            return
+        thread: threading.Thread | None = None
+
+        def _tracked() -> None:
+            try:
+                fn()
+            finally:
+                if thread is not None:
+                    with self._lock:
+                        self._active.discard(thread)
+                        self._active_count = max(0, self._active_count - 1)
+
+        thread = threading.Thread(target=_tracked, name=name or "image-task", daemon=True)
+        with self._lock:
+            self._active.add(thread)
+            self._active_count += 1
+        thread.start()
+
+    def _decrement(self) -> None:
+        with self._lock:
+            self._active_count = max(0, self._active_count - 1)
+
+    def active_count(self) -> int:
+        """当前在途执行单元数量（用于可观测指标）。"""
+        with self._lock:
+            return self._active_count
+
+    def shutdown(self, wait: bool = True, timeout: float | None = None) -> None:
+        """关闭执行管理器：默认模式等待活动线程结束；线程池模式调用池的 shutdown。"""
+        with self._lock:
+            pool = self._thread_pool
+            active = list(self._active)
+        if pool is not None:
+            pool.shutdown(wait=wait)
+            return
+        if not wait:
+            return
+        deadline = time.monotonic() + (timeout if timeout is not None else 10.0)
+        for thread in active:
+            remain = deadline - time.monotonic()
+            if remain <= 0:
+                break
+            thread.join(timeout=remain)
 
 
 class ImageTaskService:
@@ -230,13 +308,10 @@ class ImageTaskService:
             should_start = True
 
         if should_start:
-            thread = threading.Thread(
-                target=self._run_task,
-                args=(key, mode, payload, dict(identity), _clean(payload.get("model"), "gpt-image-2")),
+            image_task_executor.submit(
+                lambda: self._run_task(key, mode, payload, dict(identity), _clean(payload.get("model"), "gpt-image-2")),
                 name=f"image-task-{task_id[:16]}",
-                daemon=True,
             )
-            thread.start()
         return _public_task(task)
 
     def _run_task(
@@ -461,14 +536,11 @@ class ImageTaskService:
             # 将任务状态重置为 running
             self._update_task(key, status=TASK_STATUS_RUNNING, error="")
 
-        # 启动新线程继续轮询
-        thread = threading.Thread(
-            target=self._run_resume_poll,
-            args=(key, conversation_id, extra_timeout_secs, dict(identity), mode, model),
+        # 启动新执行单元继续轮询（统一由执行管理器管理）
+        image_task_executor.submit(
+            lambda: self._run_resume_poll(key, conversation_id, extra_timeout_secs, dict(identity), mode, model),
             name=f"image-resume-{_clean(task_id)[:16]}",
-            daemon=True,
         )
-        thread.start()
         return _public_task(task)
 
     def _run_resume_poll(
@@ -548,3 +620,6 @@ class ImageTaskService:
 
 
 image_task_service = ImageTaskService(DATA_DIR / "image_tasks.json")
+
+
+image_task_executor = ImageTaskExecutor()
