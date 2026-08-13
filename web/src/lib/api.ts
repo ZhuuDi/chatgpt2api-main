@@ -185,6 +185,11 @@ export type SettingsConfig = {
   account_remote_info_cache_ttl_secs?: number | string;
   log_max_bytes?: number | string;
   log_backup_count?: number | string;
+  image_auto_cleanup_enabled?: boolean;
+  image_min_free_mb?: number | string;
+  image_cleanup_batch_size?: number | string;
+  image_cleanup_batch_interval_secs?: number | string;
+  image_cleanup_max_batches_per_run?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   auto_relogin_after_refresh?: boolean;

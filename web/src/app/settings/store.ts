@@ -187,6 +187,11 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     account_remote_info_cache_ttl_secs: Number(config.account_remote_info_cache_ttl_secs || 30),
     log_max_bytes: Number(config.log_max_bytes || 104857600),
     log_backup_count: Number(config.log_backup_count || 5),
+    image_auto_cleanup_enabled: Boolean(config.image_auto_cleanup_enabled !== false),
+    image_min_free_mb: Number(config.image_min_free_mb || 500),
+    image_cleanup_batch_size: Number(config.image_cleanup_batch_size || 50),
+    image_cleanup_batch_interval_secs: Number(config.image_cleanup_batch_interval_secs || 2.0),
+    image_cleanup_max_batches_per_run: Number(config.image_cleanup_max_batches_per_run || 10),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
     auto_relogin_after_refresh: Boolean(config.auto_relogin_after_refresh),
@@ -319,6 +324,11 @@ type SettingsStore = {
   setAccountRemoteInfoCacheTtlSecs: (value: string) => void;
   setLogMaxBytes: (value: string) => void;
   setLogBackupCount: (value: string) => void;
+  setImageAutoCleanupEnabled: (value: boolean) => void;
+  setImageMinFreeMb: (value: string) => void;
+  setImageCleanupBatchSize: (value: string) => void;
+  setImageCleanupBatchIntervalSecs: (value: string) => void;
+  setImageCleanupMaxBatchesPerRun: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
   setAutoReloginAfterRefresh: (value: boolean) => void;
@@ -609,6 +619,25 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setLogBackupCount: (value) => {
     set((state) => state.config ? { config: { ...state.config, log_backup_count: value } } : {});
+  },
+  setImageAutoCleanupEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_auto_cleanup_enabled: value } } : {});
+  },
+
+  setImageMinFreeMb: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_min_free_mb: value } } : {});
+  },
+
+  setImageCleanupBatchSize: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_cleanup_batch_size: value } } : {});
+  },
+
+  setImageCleanupBatchIntervalSecs: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_cleanup_batch_interval_secs: value } } : {});
+  },
+
+  setImageCleanupMaxBatchesPerRun: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_cleanup_max_batches_per_run: value } } : {});
   },
 
   setAutoRemoveInvalidAccounts: (value) => {

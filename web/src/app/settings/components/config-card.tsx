@@ -40,6 +40,11 @@ export function ConfigCard() {
   const setAccountRemoteInfoCacheTtlSecs = useSettingsStore((state) => state.setAccountRemoteInfoCacheTtlSecs);
   const setLogMaxBytes = useSettingsStore((state) => state.setLogMaxBytes);
   const setLogBackupCount = useSettingsStore((state) => state.setLogBackupCount);
+  const setImageAutoCleanupEnabled = useSettingsStore((state) => state.setImageAutoCleanupEnabled);
+  const setImageMinFreeMb = useSettingsStore((state) => state.setImageMinFreeMb);
+  const setImageCleanupBatchSize = useSettingsStore((state) => state.setImageCleanupBatchSize);
+  const setImageCleanupBatchIntervalSecs = useSettingsStore((state) => state.setImageCleanupBatchIntervalSecs);
+  const setImageCleanupMaxBatchesPerRun = useSettingsStore((state) => state.setImageCleanupMaxBatchesPerRun);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
   const setAutoReloginAfterRefresh = useSettingsStore((state) => state.setAutoReloginAfterRefresh);
@@ -346,6 +351,56 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">单路图片生成所有类型重试（超时/网络/换号等）的合计次数上限，防止重试放大并发。</p>
+          </div>
+          <div className="space-y-2 md:col-span-2">
+            <div className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3">
+              <Checkbox
+                checked={Boolean(config?.image_auto_cleanup_enabled !== false)}
+                onCheckedChange={(checked) => setImageAutoCleanupEnabled(Boolean(checked))}
+              />
+              <span className="text-sm text-stone-700">自动清理图片空间</span>
+            </div>
+            <p className="text-xs text-stone-500">剩余空间低于阈值时，自动从最旧的图片开始分批删除，直到达到目标剩余空间。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">剩余空间阈值</label>
+            <Input
+              value={String(config?.image_min_free_mb ?? "")}
+              onChange={(event) => setImageMinFreeMb(event.target.value)}
+              placeholder="500"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位 MB。磁盘剩余空间低于该值触发自动清理。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">每批删除数量</label>
+            <Input
+              value={String(config?.image_cleanup_batch_size ?? "")}
+              onChange={(event) => setImageCleanupBatchSize(event.target.value)}
+              placeholder="50"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">每批删除的图片张数，分批避免一次性大量删除造成卡顿。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">批间间隔</label>
+            <Input
+              value={String(config?.image_cleanup_batch_interval_secs ?? "")}
+              onChange={(event) => setImageCleanupBatchIntervalSecs(event.target.value)}
+              placeholder="2"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒。每批删除之间的等待时间，降低 IO 峰值。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">每轮最大批数</label>
+            <Input
+              value={String(config?.image_cleanup_max_batches_per_run ?? "")}
+              onChange={(event) => setImageCleanupMaxBatchesPerRun(event.target.value)}
+              placeholder="10"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">每 30 分钟最多删除的批数，未删完下轮继续，避免单轮长时间占用。</p>
           </div>
           <div className="flex gap-4 md:col-span-2">
             <div className="flex-1 space-y-2">

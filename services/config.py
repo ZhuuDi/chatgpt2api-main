@@ -392,6 +392,44 @@ class ConfigStore:
             return 30
 
     @property
+    def image_auto_cleanup_enabled(self) -> bool:
+        """是否启用图片空间自动清理（剩余空间低于阈值时删除最旧图片）。"""
+        value = self.data.get("image_auto_cleanup_enabled", True)
+        return False if value is False or str(value).strip().lower() in {"false", "0", "off"} else True
+
+    @property
+    def image_min_free_mb(self) -> int:
+        """图片存储剩余空间阈值（MB），低于该值触发自动清理。"""
+        try:
+            return max(1, int(self.data.get("image_min_free_mb", 500)))
+        except (TypeError, ValueError):
+            return 500
+
+    @property
+    def image_cleanup_batch_size(self) -> int:
+        """图片自动清理每批删除的文件数，分批避免一次性大量删除卡顿。"""
+        try:
+            return max(1, int(self.data.get("image_cleanup_batch_size", 50)))
+        except (TypeError, ValueError):
+            return 50
+
+    @property
+    def image_cleanup_batch_interval_secs(self) -> float:
+        """图片自动清理批间间隔（秒）。"""
+        try:
+            return max(0.0, float(self.data.get("image_cleanup_batch_interval_secs", 2.0)))
+        except (TypeError, ValueError):
+            return 2.0
+
+    @property
+    def image_cleanup_max_batches_per_run(self) -> int:
+        """图片自动清理每轮（每 30 分钟）最多删除的批数，未删完下轮继续。"""
+        try:
+            return max(1, int(self.data.get("image_cleanup_max_batches_per_run", 10)))
+        except (TypeError, ValueError):
+            return 10
+
+    @property
     def image_poll_timeout_secs(self) -> int:
         try:
             return max(1, int(self.data.get("image_poll_timeout_secs", 120)))
@@ -613,13 +651,38 @@ class ConfigStore:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def cleanup_old_images(self) -> int:
+    def cleanup_old_images(
+        self,
+        batch_size: int | None = None,
+        batch_interval_secs: float = 0.0,
+        max_batches: int | None = None,
+    ) -> int:
+        """删除超过保留天数的旧图片；支持分批删除避免一次性大量删除卡顿。"""
         cutoff = time.time() - self.image_retention_days * 86400
+        files = sorted(
+            (p for p in self.images_dir.rglob("*") if p.is_file() and p.stat().st_mtime < cutoff),
+            key=lambda p: p.stat().st_mtime,
+        )
         removed = 0
-        for path in self.images_dir.rglob("*"):
-            if path.is_file() and path.stat().st_mtime < cutoff:
+        if batch_size is None:
+            for path in files:
                 path.unlink()
                 removed += 1
+        else:
+            batch_size = max(1, int(batch_size))
+            max_batches = max_batches if max_batches is not None else (len(files) + batch_size - 1) // batch_size
+            for batch_index in range(max(0, int(max_batches))):
+                batch = files[batch_index * batch_size:(batch_index + 1) * batch_size]
+                if not batch:
+                    break
+                for path in batch:
+                    try:
+                        path.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+                if batch_interval_secs > 0 and (batch_index + 1) * batch_size < len(files):
+                    time.sleep(max(0.0, float(batch_interval_secs)))
         for path in sorted((p for p in self.images_dir.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
             try:
                 path.rmdir()
@@ -647,6 +710,11 @@ class ConfigStore:
         data = dict(self.data)
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["image_retention_days"] = self.image_retention_days
+        data["image_auto_cleanup_enabled"] = self.image_auto_cleanup_enabled
+        data["image_min_free_mb"] = self.image_min_free_mb
+        data["image_cleanup_batch_size"] = self.image_cleanup_batch_size
+        data["image_cleanup_batch_interval_secs"] = self.image_cleanup_batch_interval_secs
+        data["image_cleanup_max_batches_per_run"] = self.image_cleanup_max_batches_per_run
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs

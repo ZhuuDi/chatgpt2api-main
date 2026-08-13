@@ -275,13 +275,26 @@ def compress_images(quality: int = 60) -> dict:
     return {"compressed": count, "saved_bytes": saved, "saved_mb": saved // (1024 * 1024)}
 
 
-def delete_to_target(target_free_mb: int, dry_run: bool = False) -> dict:
-    """删除最旧的图片直到剩余空间达到 target_free_mb"""
+def delete_to_target(
+    target_free_mb: int,
+    dry_run: bool = False,
+    *,
+    batch_size: int | None = None,
+    batch_interval_secs: float = 0.0,
+    max_batches: int | None = None,
+) -> dict:
+    """删除最旧的图片直到剩余空间达到 target_free_mb。
+
+    - batch_size=None：一次性删除（兼容旧行为，适合手动清理少量文件）；
+    - 指定 batch_size 时按批删除，批间 sleep batch_interval_secs，
+      max_batches 限制每轮最多删除的批数（未删完返回 truncated=True，下轮继续），
+      避免一次性大量删除造成卡顿。
+    """
     import shutil
     usage = shutil.disk_usage(config.images_dir)
     current_free = usage.free // (1024 * 1024)
     if current_free >= target_free_mb and not dry_run:
-        return {"removed": 0, "current_free_mb": current_free, "target_free_mb": target_free_mb, "done": True}
+        return {"removed": 0, "current_free_mb": current_free, "target_free_mb": target_free_mb, "done": True, "batches": 0, "truncated": False}
 
     files = sorted(
         (p for p in config.images_dir.rglob("*.png") if p.is_file()),
@@ -289,19 +302,33 @@ def delete_to_target(target_free_mb: int, dry_run: bool = False) -> dict:
     )
     removed = 0
     freed = 0
-    for p in files:
+    batches = 0
+    index = 0
+    while index < len(files):
         if current_free + freed // (1024 * 1024) >= target_free_mb:
             break
-        size = p.stat().st_size
-        if not dry_run:
-            rel = p.relative_to(config.images_dir).as_posix()
-            for tp in (_thumbnail_path(rel), config.image_thumbnails_dir / _safe_relative_path(rel)):
-                if tp.is_file():
-                    tp.unlink()
-            remove_tags(rel)
-            p.unlink()
-        freed += size
-        removed += 1
+        if batch_size is not None and batches >= (max_batches if max_batches is not None else float("inf")):
+            break
+        batch = files[index:index + batch_size] if batch_size is not None else files[index:]
+        if not batch:
+            break
+        index += len(batch)
+        for p in batch:
+            if current_free + freed // (1024 * 1024) >= target_free_mb:
+                break
+            size = p.stat().st_size
+            if not dry_run:
+                rel = p.relative_to(config.images_dir).as_posix()
+                for tp in (_thumbnail_path(rel), config.image_thumbnails_dir / _safe_relative_path(rel)):
+                    if tp.is_file():
+                        tp.unlink()
+                remove_tags(rel)
+                p.unlink()
+            freed += size
+            removed += 1
+        batches += 1
+        if batch_interval_secs > 0 and index < len(files) and current_free + freed // (1024 * 1024) < target_free_mb:
+            time.sleep(max(0.0, float(batch_interval_secs)))
 
     if not dry_run:
         _cleanup_empty_dirs(config.images_dir)
@@ -314,6 +341,8 @@ def delete_to_target(target_free_mb: int, dry_run: bool = False) -> dict:
         "current_free_mb": current_free + (freed // (1024 * 1024)),
         "done": (current_free + freed // (1024 * 1024)) >= target_free_mb,
         "dry_run": dry_run,
+        "batches": batches,
+        "truncated": index < len(files) and (current_free + freed // (1024 * 1024)) < target_free_mb,
     }
 
 
@@ -350,21 +379,34 @@ def download_images_zip(paths: list[str]) -> io.BytesIO:
 
 
 def _auto_cleanup_worker(stop_event: threading.Event) -> None:
-    """后台线程：每30分钟检查存储，空间低于阈值自动清理最旧图片"""
-    import shutil
-    min_free_mb = getattr(config, "image_min_free_mb", None)
-    if min_free_mb is None:
-        min_free_mb = 500
+    """后台线程：每30分钟检查存储，空间低于阈值自动分批清理最旧图片。
 
+    分批删除：每批 image_cleanup_batch_size 张、批间间隔
+    image_cleanup_batch_interval_secs、每轮最多 image_cleanup_max_batches_per_run 批，
+    未删完下轮继续，避免一次性大量删除造成卡顿。
+    """
+    import shutil
     while not stop_event.wait(1800):  # 每30分钟
         try:
-            config.cleanup_old_images()
+            config.cleanup_old_images(
+                batch_size=config.image_cleanup_batch_size,
+                batch_interval_secs=config.image_cleanup_batch_interval_secs,
+                max_batches=config.image_cleanup_max_batches_per_run,
+            )
             cleanup_image_thumbnails()
+            if not config.image_auto_cleanup_enabled:
+                continue
             usage = shutil.disk_usage(config.images_dir)
             free_mb = usage.free // (1024 * 1024)
+            min_free_mb = config.image_min_free_mb
             if free_mb < min_free_mb:
                 logger.info({"event": "image_auto_cleanup", "free_mb": free_mb, "min_free_mb": min_free_mb})
-                result = delete_to_target(min_free_mb)
+                result = delete_to_target(
+                    min_free_mb,
+                    batch_size=config.image_cleanup_batch_size,
+                    batch_interval_secs=config.image_cleanup_batch_interval_secs,
+                    max_batches=config.image_cleanup_max_batches_per_run,
+                )
                 logger.info({"event": "image_auto_cleanup_done", **result})
         except Exception:
             pass
