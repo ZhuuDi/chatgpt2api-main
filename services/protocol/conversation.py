@@ -13,6 +13,7 @@ import tiktoken
 
 from services.account_service import account_service
 from services.config import config
+from services.backend_pool import backend_pool
 from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
@@ -1340,7 +1341,7 @@ def _generate_single_image(
         })
         backend = None
         try:
-            backend = OpenAIBackendAPI(access_token=token)
+            backend = backend_pool.acquire(token)
             if request.progress_callback:
                 backend.progress_callback = request.progress_callback
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
@@ -1484,6 +1485,7 @@ def _generate_single_image(
                 "index": index,
             })
             if not emitted_for_token and is_token_invalid_error(last_error):
+                backend_pool.invalidate(token)
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 if refreshed_token and refreshed_token != token:
                     token = refreshed_token
@@ -1523,7 +1525,7 @@ def _generate_single_image(
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
         finally:
             if backend is not None:
-                backend.close()
+                backend_pool.release(token, backend)
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
