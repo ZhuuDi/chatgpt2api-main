@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import itertools
+import json
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,7 +15,7 @@ from fastapi import HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from services.config import DATA_DIR
+from services.config import DATA_DIR, config
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
@@ -27,6 +28,17 @@ class LogService:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # 批量缓冲写入：add() 只追加到内存缓冲，后台线程每 0.1s flush 一次，
+        # 或缓冲达到 1MB 时立即 flush，避免高并发下每个日志条目都 open/close 文件。
+        self._lock = threading.Lock()
+        self._buffer: list[str] = []
+        self._buffer_bytes = 0
+        self._flush_thread = threading.Thread(
+            target=self._flush_loop,
+            name="log-flush",
+            daemon=True,
+        )
+        self._flush_thread.start()
 
     @staticmethod
     def _legacy_id(raw_line: str, line_number: int) -> str:
@@ -68,10 +80,70 @@ class LogService:
             "summary": summary,
             "detail": detail or data,
         }
-        with self.path.open("a", encoding="utf-8") as file:
-            file.write(self._serialize_item(item) + "\n")
+        line = self._serialize_item(item) + "\n"
+        force = False
+        with self._lock:
+            self._buffer.append(line)
+            self._buffer_bytes += len(line.encode("utf-8", errors="ignore"))
+            if self._buffer_bytes >= 1024 * 1024:
+                force = True
+        if force:
+            self._flush()
+
+    def _flush_loop(self) -> None:
+        while True:
+            time.sleep(0.1)
+            try:
+                self._flush()
+            except Exception:
+                pass
+
+    def _flush(self) -> None:
+        """将缓冲日志批量写入文件，并按大小轮转。"""
+        with self._lock:
+            if not self._buffer:
+                return
+            lines = self._buffer
+            self._buffer = []
+            self._buffer_bytes = 0
+        try:
+            with self.path.open("a", encoding="utf-8") as file:
+                file.write("".join(lines))
+            self._rotate_if_needed()
+        except Exception:
+            # 写入失败时恢复缓冲，避免丢日志
+            with self._lock:
+                self._buffer = lines + self._buffer
+                self._buffer_bytes += sum(len(line.encode("utf-8", errors="ignore")) for line in lines)
+
+    def flush(self) -> None:
+        """立即将缓冲日志落盘（读取/退出前调用）。"""
+        self._flush()
+
+    def _rotate_if_needed(self) -> None:
+        try:
+            max_bytes = max(1024 * 1024, int(config.log_max_bytes))
+            backup_count = max(1, int(config.log_backup_count))
+        except (TypeError, ValueError):
+            max_bytes = 100 * 1024 * 1024
+            backup_count = 5
+        try:
+            if not self.path.exists() or self.path.stat().st_size < max_bytes:
+                return
+            oldest = self.path.with_suffix(self.path.suffix + f".{backup_count}")
+            if oldest.exists():
+                oldest.unlink()
+            for i in range(backup_count - 1, 0, -1):
+                src = self.path.with_suffix(self.path.suffix + f".{i}")
+                if src.exists():
+                    src.replace(self.path.with_suffix(self.path.suffix + f".{i + 1}"))
+            if self.path.exists():
+                self.path.replace(self.path.with_suffix(self.path.suffix + ".1"))
+        except Exception:
+            pass
 
     def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
+        self.flush()
         if not self.path.exists():
             return []
         items: list[dict[str, Any]] = []
@@ -88,6 +160,7 @@ class LogService:
         return items
 
     def delete(self, ids: list[str]) -> dict[str, int]:
+        self.flush()
         target_ids = {str(item or "").strip() for item in ids if str(item or "").strip()}
         if not self.path.exists() or not target_ids:
             return {"removed": 0}
