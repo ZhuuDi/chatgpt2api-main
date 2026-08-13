@@ -416,6 +416,65 @@ class ConfigStore:
             return 10.0
 
     @property
+    def image_total_timeout_secs(self) -> int:
+        """单次图片生成请求的总预算（SSE 流 + 轮询 + 下载共享），默认 180 秒。
+
+        客户端超时 = 180 + 60 = 240 秒，由下游客户端控制；服务端总预算必须小于客户端超时。
+        """
+        try:
+            return max(1, int(self.data.get("image_total_timeout_secs", 180)))
+        except (TypeError, ValueError):
+            return 180
+
+    @property
+    def executor_max_workers(self) -> int:
+        """图片任务执行管理器容量上限；0 表示不限制（默认，并发由下游调用方控制）。"""
+        try:
+            return max(0, int(self.data.get("executor_max_workers", 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    @property
+    def image_retry_budget(self) -> int:
+        """单路图片生成的总重试预算，防止多套重试机制叠加放大并发。"""
+        try:
+            return max(1, int(self.data.get("image_retry_budget", 5)))
+        except (TypeError, ValueError):
+            return 5
+
+    @property
+    def watcher_batch_size(self) -> int:
+        """账号刷新 watcher 每轮最多刷新的账号数（增量刷新批次）。"""
+        try:
+            return max(1, int(self.data.get("watcher_batch_size", 200)))
+        except (TypeError, ValueError):
+            return 200
+
+    @property
+    def account_remote_info_cache_ttl_secs(self) -> float:
+        """账号远程探测结果的本地缓存 TTL，避免并发请求重复探测同一账号。"""
+        try:
+            return max(0.0, float(self.data.get("account_remote_info_cache_ttl_secs", 30.0)))
+        except (TypeError, ValueError):
+            return 30.0
+
+    @property
+    def log_max_bytes(self) -> int:
+        """日志文件轮转大小阈值，默认 100MB。"""
+        try:
+            return max(1024 * 1024, int(self.data.get("log_max_bytes", 100 * 1024 * 1024)))
+        except (TypeError, ValueError):
+            return 100 * 1024 * 1024
+
+    @property
+    def log_backup_count(self) -> int:
+        """日志轮转保留份数，默认 5 份。"""
+        try:
+            return max(1, int(self.data.get("log_backup_count", 5)))
+        except (TypeError, ValueError):
+            return 5
+
+    @property
     def image_account_concurrency(self) -> int:
         try:
             return max(1, int(self.data.get("image_account_concurrency", 3)))
@@ -567,6 +626,13 @@ class ConfigStore:
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
+        data["image_total_timeout_secs"] = self.image_total_timeout_secs
+        data["executor_max_workers"] = self.executor_max_workers
+        data["image_retry_budget"] = self.image_retry_budget
+        data["watcher_batch_size"] = self.watcher_batch_size
+        data["account_remote_info_cache_ttl_secs"] = self.account_remote_info_cache_ttl_secs
+        data["log_max_bytes"] = self.log_max_bytes
+        data["log_backup_count"] = self.log_backup_count
         data["image_account_concurrency"] = self.image_account_concurrency
         data["image_parallel_generation"] = self.image_parallel_generation
         data["image_remove_conversation_after_result"] = self.image_remove_conversation_after_result
