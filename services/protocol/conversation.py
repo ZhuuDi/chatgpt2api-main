@@ -815,7 +815,7 @@ def _get_detailed_error_from_tasks(
 
 
 def _remove_image_conversation_later(
-        backend: OpenAIBackendAPI,
+        token: str,
         conversation_id: str,
         *,
         success: bool,
@@ -826,7 +826,10 @@ def _remove_image_conversation_later(
         return
 
     def _run() -> None:
+        backend = None
         try:
+            # 独立从 Session 池获取实例执行删除，避免与主线程释放/复用同一实例产生竞态
+            backend = backend_pool.acquire(token)
             backend.delete_conversation(conversation_id)
             logger.info({"event": "image_conversation_removed", "conversation_id": conversation_id})
         except Exception as exc:
@@ -835,6 +838,9 @@ def _remove_image_conversation_later(
                 "conversation_id": conversation_id,
                 "error": str(exc),
             })
+        finally:
+            if backend is not None:
+                backend_pool.release(token, backend)
 
     threading.Thread(target=_run, name=f"remove-image-conversation-{conversation_id}", daemon=True).start()
 
@@ -1426,7 +1432,7 @@ def _generate_single_image(
                 last_conversation_id = last_conversation_id or str(getattr(exc, "conversation_id", "") or "")
                 raise
             finally:
-                _remove_image_conversation_later(backend, last_conversation_id, success=returned_result)
+                _remove_image_conversation_later(token, last_conversation_id, success=returned_result)
             if returned_message:
                 account_service.mark_image_result(token, False)
                 return outputs

@@ -56,6 +56,7 @@ class AccountService:
         self._accounts = self._load_accounts()
         self._image_inflight: dict[str, int] = {}
         self._token_aliases: dict[str, str] = {}
+        self._remote_info_cache: dict[str, tuple[float, dict | None]] = {}
         self._cumulative_total = self._load_cumulative_total()
         # 落盘合并控制：脏标记 + 合并窗口（默认 1s），关键变更（删除/封禁）立即落盘
         self._dirty = False
@@ -1030,7 +1031,7 @@ class AccountService:
             )
             attempted_tokens.add(access_token)
             try:
-                account = self.fetch_remote_info(access_token, "get_available_access_token")
+                account = self.fetch_remote_info(access_token, "get_available_access_token", use_cache=True)
             except Exception:
                 self.release_image_slot(access_token)
                 continue
@@ -1449,14 +1450,41 @@ class AccountService:
             return dict(account)
         return None
 
+    def _get_remote_info_cache(self, access_token: str) -> dict[str, Any] | None:
+        """返回未过期的账号探测缓存；TTL<=0 或未命中返回 None。"""
+        ttl = config.account_remote_info_cache_ttl_secs
+        if ttl <= 0:
+            return None
+        with self._lock:
+            entry = self._remote_info_cache.get(access_token)
+            if entry is None:
+                return None
+            ts, result = entry
+            if time.time() - ts > ttl:
+                self._remote_info_cache.pop(access_token, None)
+                return None
+            return dict(result) if isinstance(result, dict) else None
+
+    def _set_remote_info_cache(self, access_token: str, result: dict[str, Any] | None) -> None:
+        ttl = config.account_remote_info_cache_ttl_secs
+        if ttl <= 0:
+            return
+        with self._lock:
+            self._remote_info_cache[access_token] = (time.time(), dict(result) if isinstance(result, dict) else None)
+
     def fetch_remote_info(
         self,
         access_token: str,
         event: str = "fetch_remote_info",
         defer_invalid_removal: bool = True,
+        use_cache: bool = False,
     ) -> dict[str, Any] | None:
         if not access_token:
             raise ValueError("access_token is required")
+        if use_cache:
+            cached = self._get_remote_info_cache(access_token)
+            if cached is not None:
+                return cached
 
         active_token = self.refresh_access_token(access_token, event=f"{event}:preflight") or access_token
         try:
@@ -1495,7 +1523,10 @@ class AccountService:
                     self.remove_invalid_token(active_token, event)
                 raise
         self._record_refresh_success(active_token)
-        return self.update_account(active_token, result)
+        result_account = self.update_account(active_token, result)
+        if use_cache:
+            self._set_remote_info_cache(active_token, result_account)
+        return result_account
 
     # ---- 刷新进度追踪 ----
 
