@@ -188,8 +188,12 @@ class AccountService:
     def _is_image_account_available(account: dict) -> bool:
         if not isinstance(account, dict):
             return False
-        if account.get("status") in {"禁用", "限流", "异常"}:
+        status = str(account.get("status") or "").strip()
+        if status in {"禁用", "限流", "异常"}:
             return False
+        if status == "未探测":
+            # 未探测账号允许进入候选，由生图时的远程验证（含缓存）兜底确认额度
+            return True
         return int(account.get("quota") or 0) > 0
 
     @classmethod
@@ -1164,40 +1168,52 @@ class AccountService:
             ]
 
     def list_refresh_candidates(self, limit: int = 200) -> list[str]:
-        """返回本轮需要刷新的账号 token（增量刷新候选）。
+        """返回本轮可探测的账号 token（速率节流 + 冷却期）。
 
-        优先：refresh token 即将到期 / keepalive 到期的账号；
-        其次：限流且恢复时间已到或即将到的账号；
-        最后：其余账号按最近刷新时间最旧优先，补足 limit。
-        避免每轮全量刷新全部账号导致 CPU/FD/落盘常驻满载。
+        优先级：
+        1. refresh token 即将到期 / keepalive 到期（刚需，不受冷却限制）
+        2. 未探测账号（status=未探测 或从未刷新成功），按导入时间最旧优先
+        3. 限流且恢复时间已到/将到的账号
+        4. 其余账号按最近刷新时间最旧优先
+
+        已探测成功或失败的账号均进入冷却期（默认 5 分钟），
+        避免账号数量少时高频重复探测同一账号。
         """
         limit = max(1, int(limit or 1))
         now = datetime.now(timezone.utc)
+        min_interval = max(0.0, float(config.account_probe_min_interval_secs))
         with self._lock:
-            expiring: set[str] = {
-                token
-                for account in self._accounts.values()
-                if str(account.get("refresh_token") or "").strip()
-                and (token := str(account.get("access_token") or "").strip())
-                and self._token_needs_refresh(token)
-            }
+            expiring: set[str] = set()
             keepalive_due: set[str] = set()
+            unprobed: list[tuple[datetime, str]] = []
             limited_restoring: list[tuple[datetime, str]] = []
             normal_sorted: list[tuple[datetime, str]] = []
             for account in self._accounts.values():
                 token = str(account.get("access_token") or "").strip()
                 if not token:
                     continue
+                if str(account.get("refresh_token") or "").strip() and self._token_needs_refresh(token):
+                    expiring.add(token)
+                    continue
                 if self._refresh_token_keepalive_due_at(account, now) is not None:
                     keepalive_due.add(token)
+                    continue
                 status = str(account.get("status") or "").strip()
+                last_ok = self._parse_time(account.get("last_refresh_at"))
+                last_err = self._parse_time(account.get("last_refresh_error_at"))
+                if status == "未探测" or last_ok is None:
+                    created = self._parse_time(account.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)
+                    unprobed.append((created, token))
+                    continue
+                recent = last_ok if last_ok is not None and (last_err is None or last_ok >= last_err) else last_err
+                if recent is not None and (now - recent).total_seconds() < min_interval:
+                    continue  # 冷却期内，跳过
                 if status == "限流":
                     restore = self._parse_time(account.get("restore_at"))
                     if restore is None or restore <= now + timedelta(minutes=5):
                         limited_restoring.append((restore or now, token))
                 else:
-                    last = self._parse_time(account.get("last_refresh_at")) or datetime.min.replace(tzinfo=timezone.utc)
-                    normal_sorted.append((last, token))
+                    normal_sorted.append((last_ok or datetime.min.replace(tzinfo=timezone.utc), token))
 
         selected: list[str] = []
         seen: set[str] = set()
@@ -1210,6 +1226,9 @@ class AccountService:
         for token in sorted(expiring):
             _add(token)
         for token in sorted(keepalive_due):
+            _add(token)
+        unprobed.sort(key=lambda item: item[0])
+        for _, token in unprobed:
             _add(token)
         limited_restoring.sort(key=lambda item: item[0])
         for _, token in limited_restoring:
@@ -1284,7 +1303,8 @@ class AccountService:
                     added += 1
                     self._cumulative_total += 1
                     self._save_cumulative_total()
-                    current = {"created_at": self._now()}
+                    # 新账号统一标记为"未探测"，由后台节流队列按速率消化验证
+                    current = {"created_at": self._now(), "status": "未探测"}
                 else:
                     skipped += 1
                 incoming = dict(payload)
@@ -1523,9 +1543,14 @@ class AccountService:
                     self.remove_invalid_token(active_token, event)
                 raise
         self._record_refresh_success(active_token)
-        result_account = self.update_account(active_token, result)
-        if use_cache:
-            self._set_remote_info_cache(active_token, result_account)
+        updates = dict(result or {})
+        with self._lock:
+            current_status = str((self._accounts.get(active_token) or {}).get("status") or "").strip()
+        if current_status == "未探测" and not str(updates.get("status") or "").strip():
+            updates["status"] = "正常"
+        result_account = self.update_account(active_token, updates)
+        # 任何探测成功都写入共享缓存，生图验证直接命中缓存，避免后台与生图重复探测
+        self._set_remote_info_cache(active_token, result_account)
         return result_account
 
     # ---- 刷新进度追踪 ----
@@ -1668,6 +1693,15 @@ class AccountService:
                     from services.protocol.conversation import is_tls_connection_error
                     if not is_tls_connection_error(error_str):
                         errors.append({"token": anonymize_token(token), "error": error_str})
+                        try:
+                            # 记录失败时间进入冷却期，避免短时间重复探测失败账号
+                            self.update_account(
+                                token,
+                                {"last_refresh_error": error_str, "last_refresh_error_at": self._now()},
+                                quiet=True,
+                            )
+                        except Exception:
+                            pass
                 else:
                     if account is not None:
                         refreshed += 1
@@ -1834,6 +1868,7 @@ class AccountService:
         limited = sum(1 for a in items if a.get("status") == "限流")
         abnormal = sum(1 for a in items if a.get("status") == "异常")
         disabled = sum(1 for a in items if a.get("status") == "禁用")
+        unprobed = sum(1 for a in items if a.get("status") == "未探测")
         total_quota = sum(max(0, int(a.get("quota") or 0)) for a in items if a.get("status") == "正常")
         total_success = sum(int(a.get("success") or 0) for a in items)
         total_fail = sum(int(a.get("fail") or 0) for a in items)
@@ -1848,6 +1883,7 @@ class AccountService:
             "limited": limited,
             "abnormal": abnormal,
             "disabled": disabled,
+            "unprobed": unprobed,
             "total_quota": total_quota,
             "total_success": total_success,
             "total_fail": total_fail,

@@ -475,6 +475,30 @@ class ConfigStore:
             return 5
 
     @property
+    def account_probe_rate_per_minute(self) -> int:
+        """账号后台探测速率（个/分钟），默认 120（约 2 个/秒），按上游承受力配置。"""
+        try:
+            return max(1, int(self.data.get("account_probe_rate_per_minute", 120)))
+        except (TypeError, ValueError):
+            return 120
+
+    @property
+    def account_probe_min_interval_secs(self) -> int:
+        """单个账号两次探测的最小间隔（冷却期），默认 300 秒，防止账号少时高频重复探测。"""
+        try:
+            return max(0, int(self.data.get("account_probe_min_interval_secs", 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    @property
+    def account_probe_tick_secs(self) -> float:
+        """账号探测节流循环的 tick 间隔（秒），默认 5 秒，每个 tick 探测 rate*tick/60 个账号。"""
+        try:
+            return max(1.0, float(self.data.get("account_probe_tick_secs", 5.0)))
+        except (TypeError, ValueError):
+            return 5.0
+
+    @property
     def image_account_concurrency(self) -> int:
         try:
             return max(1, int(self.data.get("image_account_concurrency", 3)))
@@ -634,6 +658,9 @@ class ConfigStore:
         data["log_max_bytes"] = self.log_max_bytes
         data["log_backup_count"] = self.log_backup_count
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["account_probe_rate_per_minute"] = self.account_probe_rate_per_minute
+        data["account_probe_min_interval_secs"] = self.account_probe_min_interval_secs
+        data["account_probe_tick_secs"] = self.account_probe_tick_secs
         data["image_parallel_generation"] = self.image_parallel_generation
         data["image_remove_conversation_after_result"] = self.image_remove_conversation_after_result
         data["image_remove_conversation_always"] = self.image_remove_conversation_always

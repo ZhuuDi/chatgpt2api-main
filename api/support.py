@@ -80,19 +80,22 @@ def sanitize_sub2api_servers(servers: list[dict]) -> list[dict]:
 
 
 def start_limited_account_watcher(stop_event: Event) -> Thread:
-    interval_seconds = config.refresh_account_interval_minute * 60
+    # 账号探测改为"速率节流循环"：每个 tick 探测 rate*tick/60 个账号，
+    # 账号冷却期（account_probe_min_interval_secs）防止短时间重复探测，
+    # 新导入账号进入"未探测"队列按同一速率消化，不瞬间全量探测。
+    tick_secs = max(1.0, float(config.account_probe_tick_secs))
+    rate_per_minute = max(1, int(config.account_probe_rate_per_minute))
+    batch_size = max(1, int(round(rate_per_minute * tick_secs / 60)))
 
     def worker() -> None:
         while not stop_event.is_set():
             try:
-                # 增量刷新：只刷新候选账号（到期/限流恢复/最久未刷），按批次控制
-                tokens = account_service.list_refresh_candidates(config.watcher_batch_size)
+                tokens = account_service.list_refresh_candidates(batch_size)
                 keepalive_tokens = account_service.list_refresh_token_keepalive_tokens()
                 if tokens:
                     print(
-                        "[account-watcher] checking "
-                        f"{len(tokens)} refresh candidates "
-                        f"(batch limit {config.watcher_batch_size})"
+                        "[account-watcher] probing "
+                        f"{len(tokens)} accounts (rate {rate_per_minute}/min, tick {tick_secs}s)"
                     )
                     account_service.refresh_accounts(tokens)
                 if keepalive_tokens:
@@ -102,7 +105,7 @@ def start_limited_account_watcher(stop_event: Event) -> Thread:
                         print(f"[account-watcher] keepalive errors: {result['errors']}")
             except Exception as exc:
                 print(f"[account-watcher] fail {exc}")
-            stop_event.wait(interval_seconds)
+            stop_event.wait(tick_secs)
 
     thread = Thread(target=worker, name="account-watcher", daemon=True)
     thread.start()
