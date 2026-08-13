@@ -1202,6 +1202,11 @@ class AccountService:
                 last_ok = self._parse_time(account.get("last_refresh_at"))
                 last_err = self._parse_time(account.get("last_refresh_error_at"))
                 if status == "未探测" or last_ok is None:
+                    # 未探测账号也受失败冷却保护（失败后转"异常"离开本队列，
+                    # 冷却结束后由异常分支重试），避免同一批失败账号被反复选中、
+                    # 其余未探测账号永远轮不到；队列保持创建时间 FIFO。
+                    if last_err is not None and (now - last_err).total_seconds() < min_interval:
+                        continue
                     created = self._parse_time(account.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)
                     unprobed.append((created, token))
                     continue
@@ -1697,12 +1702,17 @@ class AccountService:
                     if not is_tls_connection_error(error_str):
                         errors.append({"token": anonymize_token(token), "error": error_str})
                         try:
-                            # 记录失败时间进入冷却期，避免短时间重复探测失败账号
-                            self.update_account(
-                                token,
-                                {"last_refresh_error": error_str, "last_refresh_error_at": self._now()},
-                                quiet=True,
-                            )
+                            # 记录失败时间进入冷却期，避免短时间重复探测失败账号；
+                            # 未探测账号探测失败后转"异常"，离开未探测队列，
+                            # 避免同一批失败账号被反复选中、其余未探测账号永远轮不到。
+                            updates = {
+                                "last_refresh_error": error_str,
+                                "last_refresh_error_at": self._now(),
+                            }
+                            current = self.get_account(token)
+                            if current and str(current.get("status") or "").strip() == "未探测":
+                                updates["status"] = "异常"
+                            self.update_account(token, updates, quiet=True)
                         except Exception:
                             pass
                 else:
