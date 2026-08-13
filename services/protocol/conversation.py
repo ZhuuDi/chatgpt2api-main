@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Iterator
 
 import tiktoken
@@ -112,7 +112,7 @@ def image_stream_error_message(message: str) -> str:
     if is_tls_connection_error(text):
         return "upstream image connection failed, please retry later"
     if is_connection_timeout_error(text):
-        return "upstream connection timed out, please retry later"
+        return "upstream connection timed out（上游连接超时），请稍后重试"
     return text or "image generation failed"
 
 
@@ -308,6 +308,7 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
+    deadline: float | None = None  # time.monotonic() 单请求总预算截止时间（SSE+轮询+下载共享）
 
 
 @dataclass
@@ -690,6 +691,7 @@ def conversation_events(
     size: str | None = None,
     quality: str = "auto",
     thinking_effort: str = "",
+    deadline: float | None = None,
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
@@ -703,6 +705,7 @@ def conversation_events(
         images=images if image_model else None,
         system_hints=["picture_v2"] if image_model else None,
         thinking_effort=thinking_effort if not image_model else "",
+        deadline=deadline,
     )
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
@@ -836,6 +839,20 @@ def _remove_image_conversation_later(
     threading.Thread(target=_run, name=f"remove-image-conversation-{conversation_id}", daemon=True).start()
 
 
+def _remaining_budget(request: ConversationRequest) -> float:
+    """返回单请求剩余预算（秒）；未设置 deadline 时视为无限。"""
+    if request.deadline is None:
+        return float("inf")
+    return max(0.0, request.deadline - time.monotonic())
+
+
+def _download_timeout(request: ConversationRequest) -> float:
+    remaining = _remaining_budget(request)
+    if remaining == float("inf"):
+        return 120.0
+    return max(1.0, min(120.0, remaining))
+
+
 def stream_image_outputs(
         backend: OpenAIBackendAPI,
         request: ConversationRequest,
@@ -850,6 +867,7 @@ def stream_image_outputs(
             images=request.images or [],
             size=request.size,
             quality=request.quality,
+            deadline=request.deadline,
     ):
         last = event
         if event.get("type") == "conversation.delta":
@@ -1004,7 +1022,7 @@ def stream_image_outputs(
             request.progress_callback("receiving_image")
         image_items = [
             {"b64_json": base64.b64encode(image_data).decode("ascii")}
-            for image_data in backend.download_image_bytes(image_urls)
+            for image_data in backend.download_image_bytes(image_urls, timeout=_download_timeout(request))
         ]
         data = format_image_result(
             image_items,
@@ -1047,8 +1065,11 @@ def stream_image_outputs(
                 "message_preview": message[:200],
             })
             # 文本回复场景下，图片可能需要 4-5 分钟才能异步生成完成。
-            # 使用 300s 超时并允许多次重试，避免因临时网络问题提前退出。
-            retry_poll_timeout = max(config.image_poll_timeout_secs, 300)
+            # 轮询超时受单请求总预算约束（SSE + 轮询共享 deadline），避免超过客户端等待上限。
+            remaining_budget = _remaining_budget(request)
+            if remaining_budget <= 0:
+                raise ImagePollTimeoutError("ChatGPT 生图超时（单请求总预算已耗尽）")
+            retry_poll_timeout = min(max(config.image_poll_timeout_secs, 300), remaining_budget)
             MAX_POLL_RETRIES = 3
             for poll_attempt in range(1, MAX_POLL_RETRIES + 1):
                 try:
@@ -1079,8 +1100,10 @@ def stream_image_outputs(
                     })
                     # 如果还有重试次数且不是超时/内容违规错误，继续重试
                     if poll_attempt < MAX_POLL_RETRIES and not isinstance(exc, (ImagePollTimeoutError, ImageContentPolicyError)):
-                        # 递增退避：30s, 60s, 90s
-                        backoff = 30.0 * poll_attempt
+                        # 递增退避：30s, 60s, 90s（受剩余预算约束）
+                        backoff = min(30.0 * poll_attempt, _remaining_budget(request))
+                        if backoff <= 0:
+                            break
                         logger.info({
                             "event": "image_model_text_reply_poll_retry",
                             "conversation_id": conversation_id,
@@ -1101,7 +1124,7 @@ def stream_image_outputs(
                         request.progress_callback("receiving_image")
                     image_items = [
                         {"b64_json": base64.b64encode(image_data).decode("ascii")}
-                        for image_data in backend.download_image_bytes(image_urls)
+                        for image_data in backend.download_image_bytes(image_urls, timeout=_download_timeout(request))
                     ]
                     data = format_image_result(
                         image_items,
@@ -1151,11 +1174,15 @@ def stream_image_outputs(
             })
     if should_poll_for_image and conversation_id:
         # 图片可能仍在异步处理中（上游 SSE 流在图片生成完成前就结束了）。
-        # 使用 300s 超时并允许多次重试，避免因临时网络问题或图片尚未提交而提前退出。
-        retry_poll_timeout = max(config.image_poll_timeout_secs, 300)
+        # 轮询超时受单请求总预算约束（SSE + 轮询共享 deadline），避免超过客户端等待上限。
+        remaining_budget = _remaining_budget(request)
+        if remaining_budget <= 0:
+            raise ImagePollTimeoutError("ChatGPT 生图超时（单请求总预算已耗尽）")
+        retry_poll_timeout = min(max(config.image_poll_timeout_secs, 300), remaining_budget)
         MAX_FALLBACK_POLL_RETRIES = 3
         for poll_attempt in range(1, MAX_FALLBACK_POLL_RETRIES + 1):
             retry_wait_secs = min(30.0 * poll_attempt, config.image_poll_initial_wait_secs * poll_attempt)
+            retry_wait_secs = min(retry_wait_secs, _remaining_budget(request))
             logger.info({
                 "event": "image_stream_retry_poll_after_wait",
                 "conversation_id": conversation_id,
@@ -1191,8 +1218,10 @@ def stream_image_outputs(
                 })
                 # 如果还有重试次数且不是超时/内容违规错误，继续重试
                 if poll_attempt < MAX_FALLBACK_POLL_RETRIES and not isinstance(exc, (ImagePollTimeoutError, ImageContentPolicyError)):
-                    # 递增退避：30s, 60s
-                    backoff = 30.0 * poll_attempt
+                    # 递增退避：30s, 60s（受剩余预算约束）
+                    backoff = min(30.0 * poll_attempt, _remaining_budget(request))
+                    if backoff <= 0:
+                        break
                     logger.info({
                         "event": "image_stream_retry_poll_retry",
                         "conversation_id": conversation_id,
@@ -1213,7 +1242,7 @@ def stream_image_outputs(
                     request.progress_callback("receiving_image")
                 image_items = [
                     {"b64_json": base64.b64encode(image_data).decode("ascii")}
-                    for image_data in backend.download_image_bytes(image_urls)
+                    for image_data in backend.download_image_bytes(image_urls, timeout=_download_timeout(request))
                 ]
                 data = format_image_result(
                     image_items,
@@ -1313,7 +1342,21 @@ def _generate_single_image(
     poll_timeout_retry_count = 0
     account_email = ""
 
+    # 单请求总预算：SSE 流 + 轮询 + 下载 + 重试共享同一 deadline（默认 180s），
+    # 保证服务端处理时长小于客户端超时（180+60=240s）。
+    total_budget = float(config.image_total_timeout_secs)
+    deadline = time.monotonic() + total_budget
+    req = replace(request, deadline=deadline)
+
     while True:
+        if time.monotonic() >= deadline:
+            raise ImageGenerationError(
+                f"图片生成超时（单请求总预算 {int(total_budget)} 秒已耗尽，含重试）",
+                status_code=504,
+                error_type="server_error",
+                code="image_total_timeout",
+                account_email=account_email,
+            )
         try:
             if request.progress_callback:
                 request.progress_callback("getting_account")
@@ -1348,7 +1391,7 @@ def _generate_single_image(
             outputs: list[ImageOutput] = []
             last_conversation_id = ""
             try:
-                for output in stream_fn(backend, request, index, total):
+                for output in stream_fn(backend, req, index, total):
                     last_conversation_id = output.conversation_id or last_conversation_id
                     if account_email and not output.account_email:
                         output.account_email = account_email
