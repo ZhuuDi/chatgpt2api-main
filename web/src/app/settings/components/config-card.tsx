@@ -31,6 +31,15 @@ export function ConfigCard() {
   const setImageRemoveConversationAlways = useSettingsStore((state) => state.setImageRemoveConversationAlways);
   const setImageSettleSecs = useSettingsStore((state) => state.setImageSettleSecs);
   const setImageTimeoutRetrySecs = useSettingsStore((state) => state.setImageTimeoutRetrySecs);
+  const setImageTotalTimeoutSecs = useSettingsStore((state) => state.setImageTotalTimeoutSecs);
+  const setExecutorMaxWorkers = useSettingsStore((state) => state.setExecutorMaxWorkers);
+  const setImageRetryBudget = useSettingsStore((state) => state.setImageRetryBudget);
+  const setAccountProbeRatePerMinute = useSettingsStore((state) => state.setAccountProbeRatePerMinute);
+  const setAccountProbeMinIntervalSecs = useSettingsStore((state) => state.setAccountProbeMinIntervalSecs);
+  const setAccountProbeTickSecs = useSettingsStore((state) => state.setAccountProbeTickSecs);
+  const setAccountRemoteInfoCacheTtlSecs = useSettingsStore((state) => state.setAccountRemoteInfoCacheTtlSecs);
+  const setLogMaxBytes = useSettingsStore((state) => state.setLogMaxBytes);
+  const setLogBackupCount = useSettingsStore((state) => state.setLogBackupCount);
   const setAutoRemoveInvalidAccounts = useSettingsStore((state) => state.setAutoRemoveInvalidAccounts);
   const setAutoRemoveRateLimitedAccounts = useSettingsStore((state) => state.setAutoRemoveRateLimitedAccounts);
   const setAutoReloginAfterRefresh = useSettingsStore((state) => state.setAutoReloginAfterRefresh);
@@ -98,6 +107,46 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">单位分钟，控制账号自动刷新频率。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">账号探测速率</label>
+            <Input
+              value={String(config?.account_probe_rate_per_minute ?? "")}
+              onChange={(event) => setAccountProbeRatePerMinute(event.target.value)}
+              placeholder="120"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位：个/分钟。后台按该速率匀速探测账号额度，避免瞬间全量探测冲击上游。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">账号探测冷却期</label>
+            <Input
+              value={String(config?.account_probe_min_interval_secs ?? "")}
+              onChange={(event) => setAccountProbeMinIntervalSecs(event.target.value)}
+              placeholder="300"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒。单个账号两次探测的最小间隔，防止账号少时高频重复探测。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">探测节流 tick</label>
+            <Input
+              value={String(config?.account_probe_tick_secs ?? "")}
+              onChange={(event) => setAccountProbeTickSecs(event.target.value)}
+              placeholder="5"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒。后台节流循环每次 tick 探测 rate*tick/60 个账号。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">账号探测缓存 TTL</label>
+            <Input
+              value={String(config?.account_remote_info_cache_ttl_secs ?? "")}
+              onChange={(event) => setAccountRemoteInfoCacheTtlSecs(event.target.value)}
+              placeholder="30"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒。生图前对候选账号的远程验证缓存时长，避免重复探测同一账号。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">全局代理</label>
@@ -198,6 +247,16 @@ export function ConfigCard() {
             <p className="text-xs text-stone-500">单位秒，等待上游图片结果的最长时间。</p>
           </div>
           <div className="space-y-2">
+            <label className="text-sm text-stone-700">单请求总预算</label>
+            <Input
+              value={String(config?.image_total_timeout_secs ?? "")}
+              onChange={(event) => setImageTotalTimeoutSecs(event.target.value)}
+              placeholder="180"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒。SSE 流+轮询+下载共享的硬上限，客户端超时建议 +60s（如 240s）。</p>
+          </div>
+          <div className="space-y-2">
             <label className="text-sm text-stone-700">单账号图片并发</label>
             <Input
               value={String(config?.image_account_concurrency || "")}
@@ -268,6 +327,26 @@ export function ConfigCard() {
             />
             <p className="text-xs text-stone-500">单位秒，找到图片后等待多久再次确认。需配合图片二次确认机制使用。</p>
           </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">执行器容量上限</label>
+            <Input
+              value={String(config?.executor_max_workers ?? "")}
+              onChange={(event) => setExecutorMaxWorkers(event.target.value)}
+              placeholder="0"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">0=不限制（默认，并发由下游调用方控制）；设置正整数可作为部署期资源保护。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">单请求总重试预算</label>
+            <Input
+              value={String(config?.image_retry_budget ?? "")}
+              onChange={(event) => setImageRetryBudget(event.target.value)}
+              placeholder="5"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单路图片生成所有类型重试（超时/网络/换号等）的合计次数上限，防止重试放大并发。</p>
+          </div>
           <div className="flex gap-4 md:col-span-2">
             <div className="flex-1 space-y-2">
               <label className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3 text-sm text-stone-700">
@@ -304,6 +383,26 @@ export function ConfigCard() {
                 </label>
               ))}
             </div>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">日志轮转大小</label>
+            <Input
+              value={String(config?.log_max_bytes ? Math.round(Number(config.log_max_bytes) / 1024 / 1024) : "")}
+              onChange={(event) => setLogMaxBytes(String(Number(event.target.value) * 1024 * 1024))}
+              placeholder="100"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位 MB。日志文件超过该大小后轮转，避免 logs.jsonl 无限膨胀。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">日志保留份数</label>
+            <Input
+              value={String(config?.log_backup_count ?? "")}
+              onChange={(event) => setLogBackupCount(event.target.value)}
+              placeholder="5"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">日志轮转后保留的备份份数。</p>
           </div>
           <div className="space-y-2 md:col-span-2">
             <label className="text-sm text-stone-700">全局附加指令</label>

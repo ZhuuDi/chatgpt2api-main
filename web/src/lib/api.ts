@@ -176,6 +176,15 @@ export type SettingsConfig = {
   image_remove_conversation_always?: boolean;
   image_settle_secs?: number | string;
   image_timeout_retry_secs?: number | string;
+  image_total_timeout_secs?: number | string;
+  executor_max_workers?: number | string;
+  image_retry_budget?: number | string;
+  account_probe_rate_per_minute?: number | string;
+  account_probe_min_interval_secs?: number | string;
+  account_probe_tick_secs?: number | string;
+  account_remote_info_cache_ttl_secs?: number | string;
+  log_max_bytes?: number | string;
+  log_backup_count?: number | string;
   auto_remove_invalid_accounts?: boolean;
   auto_remove_rate_limited_accounts?: boolean;
   auto_relogin_after_refresh?: boolean;
