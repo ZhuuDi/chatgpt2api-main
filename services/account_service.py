@@ -1102,6 +1102,62 @@ class AccountService:
                    and (token := item.get("access_token") or "")
             ]
 
+    def list_refresh_candidates(self, limit: int = 200) -> list[str]:
+        """返回本轮需要刷新的账号 token（增量刷新候选）。
+
+        优先：refresh token 即将到期 / keepalive 到期的账号；
+        其次：限流且恢复时间已到或即将到的账号；
+        最后：其余账号按最近刷新时间最旧优先，补足 limit。
+        避免每轮全量刷新全部账号导致 CPU/FD/落盘常驻满载。
+        """
+        limit = max(1, int(limit or 1))
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            expiring: set[str] = {
+                token
+                for account in self._accounts.values()
+                if str(account.get("refresh_token") or "").strip()
+                and (token := str(account.get("access_token") or "").strip())
+                and self._token_needs_refresh(token)
+            }
+            keepalive_due: set[str] = set()
+            limited_restoring: list[tuple[datetime, str]] = []
+            normal_sorted: list[tuple[datetime, str]] = []
+            for account in self._accounts.values():
+                token = str(account.get("access_token") or "").strip()
+                if not token:
+                    continue
+                if self._refresh_token_keepalive_due_at(account, now) is not None:
+                    keepalive_due.add(token)
+                status = str(account.get("status") or "").strip()
+                if status == "限流":
+                    restore = self._parse_time(account.get("restore_at"))
+                    if restore is None or restore <= now + timedelta(minutes=5):
+                        limited_restoring.append((restore or now, token))
+                else:
+                    last = self._parse_time(account.get("last_refresh_at")) or datetime.min.replace(tzinfo=timezone.utc)
+                    normal_sorted.append((last, token))
+
+        selected: list[str] = []
+        seen: set[str] = set()
+
+        def _add(token: str) -> None:
+            if token and token not in seen:
+                seen.add(token)
+                selected.append(token)
+
+        for token in sorted(expiring):
+            _add(token)
+        for token in sorted(keepalive_due):
+            _add(token)
+        limited_restoring.sort(key=lambda item: item[0])
+        for _, token in limited_restoring:
+            _add(token)
+        normal_sorted.sort(key=lambda item: item[0])
+        for _, token in normal_sorted:
+            _add(token)
+        return selected[:limit]
+
     @staticmethod
     def _account_payload_token(item: dict) -> str:
         return str(item.get("access_token") or item.get("accessToken") or "").strip()
@@ -1248,6 +1304,7 @@ class AccountService:
             next_item["last_invalid_at"] = None
             next_item["last_refresh_error"] = None
             next_item["last_refresh_error_at"] = None
+            next_item["last_refresh_at"] = self._now()
             account = self._normalize_account(next_item)
             if account is not None:
                 self._accounts[access_token] = account
@@ -1496,7 +1553,7 @@ class AccountService:
 
         refreshed = 0
         errors = []
-        max_workers = min(10, len(access_tokens))
+        max_workers = min(5, len(access_tokens))
 
         if progress_id:
             self.init_refresh_progress(progress_id, len(access_tokens))
