@@ -3,12 +3,13 @@ from __future__ import annotations
 import base64
 import json
 import secrets
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from threading import Condition, Lock, Thread
+from threading import Condition, Lock, RLock, Thread
 from typing import Any
 from urllib.parse import urlencode
 
@@ -48,7 +49,7 @@ class AccountService:
 
     def __init__(self, storage_backend: StorageBackend):
         self.storage = storage_backend
-        self._lock = Lock()
+        self._lock = RLock()
         self._token_refresh_lock = Lock()
         self._image_slot_condition = Condition(self._lock)
         self._index = 0
@@ -56,6 +57,10 @@ class AccountService:
         self._image_inflight: dict[str, int] = {}
         self._token_aliases: dict[str, str] = {}
         self._cumulative_total = self._load_cumulative_total()
+        # 落盘合并控制：脏标记 + 合并窗口（默认 1s），关键变更（删除/封禁）立即落盘
+        self._dirty = False
+        self._flush_scheduled = False
+        self._flush_interval = 1.0
 
     def _get_cumulative_file(self) -> Path:
         from services.config import DATA_DIR
@@ -125,8 +130,58 @@ class AccountService:
             if (normalized := self._normalize_account(item)) is not None
         }
 
-    def _save_accounts(self) -> None:
-        self.storage.save_accounts(list(self._accounts.values()))
+    def _save_accounts(self, *, immediate: bool = False) -> None:
+        """标记账号数据为脏并调度合并落盘。
+
+        - immediate=True：立即原子落盘（用于删除/封禁等关键变更）；
+        - 否则在 _flush_interval 合并窗口内多次变更只写一次磁盘，
+          避免每次账号更新都全量重写 accounts.json。
+        """
+        with self._lock:
+            self._dirty = True
+        if immediate:
+            self._flush_accounts_now()
+        else:
+            self._schedule_flush()
+
+    def _flush_accounts_now(self) -> None:
+        """立即将账号数据原子落盘；失败时恢复脏标记以便重试。"""
+        with self._lock:
+            if not self._dirty:
+                return
+            self._dirty = False
+            accounts = list(self._accounts.values())
+        try:
+            self.storage.save_accounts(accounts)
+        except Exception:
+            with self._lock:
+                self._dirty = True
+            raise
+
+    def _schedule_flush(self) -> None:
+        with self._lock:
+            if self._flush_scheduled:
+                return
+            self._flush_scheduled = True
+        threading.Thread(target=self._flush_worker, name="account-flush", daemon=True).start()
+
+    def _flush_worker(self) -> None:
+        try:
+            time.sleep(self._flush_interval)
+            self._flush_accounts_now()
+        except Exception:
+            pass
+        finally:
+            with self._lock:
+                self._flush_scheduled = False
+            # 合并窗口内又产生新变更时，再调度一轮
+            with self._lock:
+                if self._dirty:
+                    self._schedule_flush()
+
+    def flush(self) -> None:
+        """立即落盘（服务退出/测试时调用）。"""
+        self._flush_accounts_now()
 
     @staticmethod
     def _is_image_account_available(account: dict) -> bool:
@@ -1264,7 +1319,7 @@ class AccountService:
                     self._index %= len(self._accounts)
                 else:
                     self._index = 0
-                self._save_accounts()
+                self._save_accounts(immediate=True)
                 log_service.add(LOG_TYPE_ACCOUNT, f"删除 {removed} 个账号", {"removed": removed})
             items = [dict(item) for item in self._accounts.values()]
         return {"removed": removed, "items": items}
@@ -1282,7 +1337,7 @@ class AccountService:
                 return None
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
-                self._save_accounts()
+                self._save_accounts(immediate=True)
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[access_token] = account
@@ -1381,7 +1436,7 @@ class AccountService:
                 return None
             if account.get("status") == "限流" and config.auto_remove_rate_limited_accounts:
                 self._accounts.pop(access_token, None)
-                self._save_accounts()
+                self._save_accounts(immediate=True)
                 log_service.add(LOG_TYPE_ACCOUNT, "自动移除限流账号", {"token": anonymize_token(access_token)})
                 return None
             self._accounts[access_token] = account

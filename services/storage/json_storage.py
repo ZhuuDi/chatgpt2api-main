@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -29,10 +30,12 @@ class JSONStorageBackend(StorageBackend):
     @staticmethod
     def _save_json_list(file_path: Path, items: list[dict[str, Any]]) -> None:
         file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_text(
+        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
+        tmp_path.write_text(
             json.dumps(items, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        os.replace(tmp_path, file_path)
 
     def load_accounts(self) -> list[dict[str, Any]]:
         """从 JSON 文件加载账号数据"""
