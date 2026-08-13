@@ -1348,6 +1348,11 @@ def _generate_single_image(
     deadline = time.monotonic() + total_budget
     req = replace(request, deadline=deadline)
 
+    # 单请求总重试预算：约束所有重试类型（text-reply/TLS/连接超时/轮询超时/token 轮换）
+    # 叠加后的总次数，防止多套重试机制放大并发。
+    retry_budget = int(config.image_retry_budget)
+    total_retry_count = 0
+
     while True:
         if time.monotonic() >= deadline:
             raise ImageGenerationError(
@@ -1355,6 +1360,14 @@ def _generate_single_image(
                 status_code=504,
                 error_type="server_error",
                 code="image_total_timeout",
+                account_email=account_email,
+            )
+        if total_retry_count > retry_budget:
+            raise ImageGenerationError(
+                f"图片生成失败：单请求重试预算 {retry_budget} 次已耗尽",
+                status_code=502,
+                error_type="server_error",
+                code="retry_budget_exhausted",
                 account_email=account_email,
             )
         try:
@@ -1448,6 +1461,7 @@ def _generate_single_image(
                         "index": index,
                         "error": str(exc)[:200],
                     })
+                    total_retry_count += 1
                     continue
                 logger.warning({
                     "event": "image_poll_timeout_exhausted_retries",
@@ -1492,6 +1506,7 @@ def _generate_single_image(
                         "index": index,
                         "error": error_text[:200],
                     })
+                    total_retry_count += 1
                     continue
                 logger.warning({
                     "event": "image_model_text_reply_exhausted_retries",
@@ -1532,8 +1547,10 @@ def _generate_single_image(
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 if refreshed_token and refreshed_token != token:
                     token = refreshed_token
+                    total_retry_count += 1
                     continue
                 account_service.remove_invalid_token(token, "image_stream")
+                total_retry_count += 1
                 continue
             # TLS/SSL 连接错误：自动重试
             if not emitted_for_token and is_tls_connection_error(last_error):
@@ -1548,6 +1565,7 @@ def _generate_single_image(
                         "error": last_error[:200],
                     })
                     time.sleep(min(2.0 * tls_retry_count, 10.0))
+                    total_retry_count += 1
                     continue
             # 连接超时错误（curl 28）：同账号短等待重试，不切换账号
             if not emitted_for_token and is_connection_timeout_error(last_error):
@@ -1564,6 +1582,7 @@ def _generate_single_image(
                         "error": last_error[:200],
                     })
                     time.sleep(wait_secs)
+                    total_retry_count += 1
                     continue
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
         finally:
