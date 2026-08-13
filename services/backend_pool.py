@@ -79,6 +79,11 @@ class OpenAIBackendPool:
                 except Exception:
                     pass
 
+    def account_count(self) -> int:
+        """池中当前持有实例的账号数量（用于指标观测）。"""
+        with self._lock:
+            return len(self._pool)
+
     def close_idle(self, idle_secs: float | None = None) -> int:
         """关闭空闲超过阈值的实例，返回关闭数量。"""
         idle_secs = self._idle_timeout_secs if idle_secs is None else idle_secs

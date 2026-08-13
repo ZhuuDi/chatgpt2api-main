@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import threading
+from datetime import datetime
 from urllib.parse import quote
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -292,6 +295,50 @@ def create_router(app_version: str) -> APIRouter:
     ):
         require_admin(authorization)
         return await run_in_threadpool(delete_to_target, target_free_mb, dry_run)
+
+    @router.get("/metrics")
+    async def runtime_metrics():
+        """运行时指标：FD/线程/内存、任务状态与耗时分位、在途账号槽位、后端池。"""
+        from services.account_service import account_service as acct_svc
+        from services.backend_pool import backend_pool
+        from services.image_task_service import image_task_executor, image_task_service
+
+        fd_count = None
+        rss_mb = None
+        try:
+            fd_count = len(os.listdir("/proc/self/fd"))
+        except Exception:
+            pass
+        try:
+            with open("/proc/self/statm", "r", encoding="utf-8") as f:
+                parts = f.read().split()
+            if len(parts) >= 2:
+                page_size_kb = os.sysconf("SC_PAGE_SIZE") / 1024
+                rss_mb = round(int(parts[1]) * page_size_kb / 1024, 1)
+        except Exception:
+            pass
+
+        return {
+            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "runtime": {
+                "fd_count": fd_count,
+                "thread_count": threading.active_count(),
+                "rss_mb": rss_mb,
+            },
+            "executor": {
+                "active": image_task_executor.active_count(),
+                "max_workers": image_task_executor.max_workers,
+            },
+            "image_tasks": image_task_service.status_counts(),
+            "latency_ms": image_task_service.latency_percentiles(),
+            "account_pool": {
+                "inflight": acct_svc.inflight_total(),
+                "account_count": acct_svc.get_stats().get("total", 0),
+            },
+            "backend_pool": {
+                "accounts_with_sessions": backend_pool.account_count(),
+            },
+        }
 
     @router.get("/health", response_model=None)
     async def health_dashboard(format: str = Query(default="html")):

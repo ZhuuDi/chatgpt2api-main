@@ -1124,6 +1124,11 @@ class AccountService:
             account = self._accounts.get(access_token)
             return dict(account) if account else None
 
+    def inflight_total(self) -> int:
+        """当前图片生成在途槽位总数（用于指标观测与泄漏诊断）。"""
+        with self._lock:
+            return int(sum(self._image_inflight.values()))
+
     def list_accounts(self) -> list[dict]:
         """返回所有账号的副本，并为每个账号附加当前图片在途数 image_inflight。
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from datetime import datetime
@@ -189,6 +190,7 @@ class ImageTaskService:
         self.retention_days_getter = retention_days_getter or (lambda: config.image_retention_days)
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
+        self._durations: deque[float] = deque(maxlen=1000)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock:
             self._tasks = self._load_locked()
@@ -350,6 +352,7 @@ class ImageTaskService:
                 raise error
             usage = result.get("usage")
             duration_ms = int((time.time() - started) * 1000)
+            self._record_duration(duration_ms)
             self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, usage=usage, error="", duration_ms=duration_ms)
             self._log_call(
                 identity,
@@ -366,6 +369,7 @@ class ImageTaskService:
             account_email = _clean(getattr(exc, "account_email", ""))
             conversation_id = _clean(getattr(exc, "conversation_id", ""))
             duration_ms = int((time.time() - started) * 1000)
+            self._record_duration(duration_ms)
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[],
                               duration_ms=duration_ms,
                               **({"conversation_id": conversation_id} if conversation_id else {}))
@@ -420,6 +424,33 @@ class ImageTaskService:
             log_service.add(LOG_TYPE_CALL, f"{summary_prefix}{suffix}", detail)
         except Exception:
             pass
+
+    def _record_duration(self, duration_ms: float) -> None:
+        """记录任务执行耗时（滑动窗口 1000 条），供指标接口统计 P50/P95/P99。"""
+        with self._lock:
+            self._durations.append(float(duration_ms))
+
+    def status_counts(self) -> dict[str, int]:
+        """按状态统计任务数量（含排队/执行中/终态）。"""
+        with self._lock:
+            counts = {status: 0 for status in (TASK_STATUS_QUEUED, TASK_STATUS_RUNNING, TASK_STATUS_SUCCESS, TASK_STATUS_ERROR)}
+            for task in self._tasks.values():
+                status = str(task.get("status") or TASK_STATUS_ERROR)
+                counts[status] = counts.get(status, 0) + 1
+            return counts
+
+    def latency_percentiles(self) -> dict[str, float | None]:
+        """最近 1000 条任务耗时的 P50/P95/P99（毫秒）。"""
+        with self._lock:
+            values = sorted(self._durations)
+        if not values:
+            return {"p50": None, "p95": None, "p99": None, "samples": 0}
+        def percentile(p: float) -> float:
+            if not values:
+                return 0.0
+            index = min(len(values) - 1, max(0, int(len(values) * p)))
+            return round(values[index], 1)
+        return {"p50": percentile(0.50), "p95": percentile(0.95), "p99": percentile(0.99), "samples": len(values)}
 
     def _update_task(self, key: str, **updates: Any) -> None:
         with self._lock:
@@ -591,7 +622,9 @@ class ImageTaskService:
                 "",
                 int(time.time()),
             )["data"]
-            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="", duration_ms=int((time.time() - started) * 1000))
+            resume_duration_ms = int((time.time() - started) * 1000)
+            self._record_duration(resume_duration_ms)
+            self._update_task(key, status=TASK_STATUS_SUCCESS, data=data, error="", duration_ms=resume_duration_ms)
             self._log_call(
                 identity,
                 mode,
@@ -604,6 +637,7 @@ class ImageTaskService:
         except Exception as exc:
             error_message = str(exc) or "resume poll failed"
             duration_ms = int((time.time() - started) * 1000)
+            self._record_duration(duration_ms)
             self._update_task(key, status=TASK_STATUS_ERROR, error=error_message, data=[], duration_ms=duration_ms)
             self._log_call(
                 identity,
