@@ -11,6 +11,7 @@ import {
   CircleOff,
   Copy,
   Download,
+  Hourglass,
   Link2,
   LoaderCircle,
   LogIn,
@@ -69,6 +70,7 @@ const accountStatusOptions: { label: string; value: AccountStatus | "all" }[] = 
   { label: "限流", value: "限流" },
   { label: "异常", value: "异常" },
   { label: "禁用", value: "禁用" },
+  { label: "未探测", value: "未探测" },
 ];
 
 const statusMeta: Record<
@@ -82,6 +84,7 @@ const statusMeta: Record<
   限流: { icon: CircleAlert, badge: "warning" },
   异常: { icon: CircleOff, badge: "danger" },
   禁用: { icon: Ban, badge: "secondary" },
+  未探测: { icon: Hourglass, badge: "secondary" },
 };
 
 const metricCards = [
@@ -90,6 +93,7 @@ const metricCards = [
   { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
   { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
+  { key: "unprobed", label: "未探测", color: "text-amber-500", icon: Hourglass },
   { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
 ] as const;
 
@@ -271,9 +275,10 @@ function AccountsPageContent() {
     const limited = accounts.filter((item) => item.status === "限流").length;
     const abnormal = accounts.filter((item) => item.status === "异常").length;
     const disabled = accounts.filter((item) => item.status === "禁用").length;
+    const unprobed = accounts.filter((item) => item.status === "未探测").length;
     const quota = formatQuotaSummary(accounts);
 
-    return { total, active, limited, abnormal, disabled, quota };
+    return { total, active, limited, abnormal, disabled, unprobed, quota };
   }, [accounts]);
 
   const accountTypeOptions = useMemo(
@@ -366,6 +371,7 @@ function AccountsPageContent() {
     const baseLimited = baseAccountsList.filter((a) => a.status === "限流").length;
     const baseAbnormal = baseAccountsList.filter((a) => a.status === "异常").length;
     const baseDisabled = baseAccountsList.filter((a) => a.status === "禁用").length;
+    const baseUnprobed = baseAccountsList.filter((a) => a.status === "未探测").length;
     const baseNormalAccounts = baseAccountsList.filter((a) => a.status === "正常");
     const baseQuotaNum = baseNormalAccounts.reduce((s, a) => s + Math.max(0, a.quota), 0);
 
@@ -417,12 +423,14 @@ function AccountsPageContent() {
               const runningLimited = baseLimited + ((p.status_counts?.["限流"]) ?? 0);
               const runningAbnormal = baseAbnormal + ((p.status_counts?.["异常"]) ?? 0);
               const runningDisabled = baseDisabled + ((p.status_counts?.["禁用"]) ?? 0);
+              const runningUnprobed = baseUnprobed + ((p.status_counts?.["未探测"]) ?? 0);
               setRefreshSummary({
                 total: accounts.length,
                 active: runningActive,
                 limited: runningLimited,
                 abnormal: runningAbnormal,
                 disabled: runningDisabled,
+                unprobed: runningUnprobed,
                 quota: formatCompact(baseQuotaNum + (p.total_quota ?? 0)),
               });
             }

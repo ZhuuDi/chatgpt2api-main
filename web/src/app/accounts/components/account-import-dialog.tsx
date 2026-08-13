@@ -238,6 +238,10 @@ export function AccountImportDialog({ disabled, onImported }: AccountImportDialo
         toast.error(
           `${successText ?? "导入完成"}，新增 ${data.added ?? 0} 个，已刷新 ${data.refreshed ?? 0} 个，失败 ${data.errors?.length ?? 0} 个${firstError ? `，首个错误：${firstError}` : ""}`,
         );
+      } else if (data.background_probe) {
+        toast.success(
+          `${successText ?? "导入完成"}，新增 ${data.added ?? 0} 个，跳过 ${data.skipped ?? 0} 个重复项，已加入后台探测队列，将按速率自动探测额度`,
+        );
       } else {
         toast.success(
           `${successText ?? "导入完成"}，新增 ${data.added ?? 0} 个，跳过 ${data.skipped ?? 0} 个重复项，已自动刷新账号信息`,

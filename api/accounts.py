@@ -48,6 +48,8 @@ class UserKeyUpdateRequest(BaseModel):
 class AccountCreateRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
     accounts: list[dict[str, Any]] = Field(default_factory=list)
+    # 导入后是否同步刷新（仅建议小批量使用；大批量请走后台速率探测）
+    refresh_after_import: bool = False
 
 
 class AccountDeleteRequest(BaseModel):
@@ -230,12 +232,23 @@ def create_router() -> APIRouter:
                 result["skipped"] = int(result.get("skipped") or 0) + int(extra_result.get("skipped") or 0)
         else:
             result = account_service.add_accounts(tokens)
-        refresh_result = account_service.refresh_accounts(tokens)
+        # 导入后默认不再同步全量刷新：新账号标为"未探测"，
+        # 由后台 watcher 按速率节流自动探测（account_probe_rate_per_minute）。
+        # 仅小批量（<=50）且显式 refresh_after_import=True 时同步刷新，避免大批量导入接口挂起。
+        background_probe = True
+        refreshed = 0
+        errors: list[dict] = []
+        if body.refresh_after_import and len(tokens) <= 50:
+            refresh_result = account_service.refresh_accounts(tokens)
+            background_probe = False
+            refreshed = refresh_result.get("refreshed", 0)
+            errors = refresh_result.get("errors", [])
         return {
             **result,
-            "refreshed": refresh_result.get("refreshed", 0),
-            "errors": refresh_result.get("errors", []),
-            "items": refresh_result.get("items", result.get("items", [])),
+            "refreshed": refreshed,
+            "errors": errors,
+            "items": account_service.list_accounts(),
+            "background_probe": background_probe,
         }
 
     @router.delete("/api/accounts")
