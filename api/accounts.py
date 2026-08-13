@@ -272,7 +272,15 @@ def create_router() -> APIRouter:
 
         async def _do_refresh():
             try:
-                await run_in_threadpool(account_service.refresh_accounts, access_tokens, progress_id, False)
+                # use_cache=True：30s 内后台刚探测过的账号直接命中缓存秒过，
+                # 只真正探测未探测/缓存过期的账号，避免与后台节流探测重复打上游
+                await run_in_threadpool(
+                    account_service.refresh_accounts,
+                    access_tokens,
+                    progress_id,
+                    False,
+                    True,
+                )
             except Exception as e:
                 account_service.finish_refresh_progress(progress_id, error=str(e))
 

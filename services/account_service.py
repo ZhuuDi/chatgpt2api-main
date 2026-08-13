@@ -1658,6 +1658,7 @@ class AccountService:
         access_tokens: list[str],
         progress_id: str | None = None,
         defer_invalid_removal: bool = True,
+        use_cache: bool = False,
     ) -> dict[str, Any]:
         access_tokens = list(dict.fromkeys(token for token in access_tokens if token))
         if not access_tokens:
@@ -1677,7 +1678,9 @@ class AccountService:
         executor = ThreadPoolExecutor(max_workers=max_workers)
         try:
             futures = {
-                executor.submit(self.fetch_remote_info, token, "refresh_accounts", defer_invalid_removal): token
+                executor.submit(
+                    self.fetch_remote_info, token, "refresh_accounts", defer_invalid_removal, use_cache
+                ): token
                 for token in access_tokens
             }
             for future in as_completed(futures):
