@@ -1165,6 +1165,47 @@ class AccountService:
         with self._lock:
             return len(self._accounts)
 
+    def list_accounts_filtered(
+        self,
+        status: str = "",
+        account_type: str = "",
+        search: str = "",
+        limit: int = 0,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """按状态/类型/关键词过滤账号，可选分页，返回 (当前页, 过滤后总数)。
+
+        供账号管理页服务端分页使用：后端只返回当前页，避免账号上千时全量
+        序列化与传输。
+        """
+        limit = max(0, int(limit or 0))
+        offset = max(0, int(offset or 0))
+        status = str(status or "").strip()
+        account_type = str(account_type or "").strip()
+        search = str(search or "").strip().lower()
+        with self._lock:
+            matched: list[dict] = []
+            for item in self._accounts.values():
+                if status and str(item.get("status") or "") != status:
+                    continue
+                if account_type and str(item.get("type") or "") != account_type:
+                    continue
+                if search:
+                    token = str(item.get("access_token") or "").lower()
+                    email = str(item.get("email") or "").lower()
+                    if search not in token and search not in email:
+                        continue
+                account = dict(item)
+                token = str(account.get("access_token") or "")
+                account["image_inflight"] = int(self._image_inflight.get(token, 0))
+                matched.append(account)
+            total_matched = len(matched)
+            if limit > 0:
+                page = matched[offset:offset + limit]
+            else:
+                page = matched
+            return page, total_matched
+
     def list_limited_tokens(self) -> list[str]:
         with self._lock:
             return [

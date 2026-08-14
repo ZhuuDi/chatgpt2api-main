@@ -54,6 +54,7 @@ class AccountCreateRequest(BaseModel):
 
 class AccountDeleteRequest(BaseModel):
     tokens: list[str] = Field(default_factory=list)
+    all_abnormal: bool = False
 
 
 class AccountRefreshRequest(BaseModel):
@@ -214,15 +215,25 @@ def create_router() -> APIRouter:
         authorization: str | None = Header(default=None),
         limit: int = Query(default=0, ge=0),
         offset: int = Query(default=0, ge=0),
+        status: str = Query(default=""),
+        type: str = Query(default="", alias="type"),
+        search: str = Query(default=""),
     ):
         require_admin(authorization)
-        items = account_service.list_accounts(limit=limit, offset=offset)
-        total = account_service.accounts_total()
+        items, total = account_service.list_accounts_filtered(
+            status=status,
+            account_type=type,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+        stats = account_service.get_stats()
         return {
             "items": items,
             "total": total,
             "limit": limit if limit > 0 else total,
             "offset": offset,
+            "summary": stats,
         }
 
     @router.post("/api/accounts")
@@ -265,6 +276,12 @@ def create_router() -> APIRouter:
     @router.delete("/api/accounts")
     async def delete_accounts(body: AccountDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
+        if body.all_abnormal:
+            abnormal_tokens = account_service.list_accounts_filtered(status="异常")[0]
+            tokens = [str(item.get("access_token") or "").strip() for item in abnormal_tokens if str(item.get("access_token") or "").strip()]
+            if not tokens:
+                return {"removed": 0, "items": account_service.list_accounts()}
+            return account_service.delete_accounts(tokens)
         tokens = [str(token or "").strip() for token in body.tokens if str(token or "").strip()]
         if not tokens:
             raise HTTPException(status_code=400, detail={"error": "tokens is required"})
@@ -339,6 +356,8 @@ def create_router() -> APIRouter:
     async def export_accounts(body: AccountExportRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         access_tokens = _unique_tokens(body.access_tokens)
+        if not access_tokens:
+            access_tokens = account_service.list_tokens()
         items = account_service.build_export_items(access_tokens)
         if not items:
             raise HTTPException(
