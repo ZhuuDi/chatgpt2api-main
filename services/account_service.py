@@ -58,6 +58,8 @@ class AccountService:
         self._token_aliases: dict[str, str] = {}
         self._remote_info_cache: dict[str, tuple[float, dict | None]] = {}
         self._cumulative_total = self._load_cumulative_total()
+        # 账号刷新复用线程池（避免每 10 秒新建 ThreadPoolExecutor 造成线程残留累积）
+        self._refresh_executor = ThreadPoolExecutor(max_workers=5, thread_name_prefix="account-refresh")
         # 落盘合并控制：脏标记 + 合并窗口（默认 1s），关键变更（删除/封禁）立即落盘
         self._dirty = False
         self._flush_scheduled = False
@@ -1737,15 +1739,14 @@ class AccountService:
 
         refreshed = 0
         errors = []
-        max_workers = min(5, len(access_tokens))
 
         if progress_id:
             self.init_refresh_progress(progress_id, len(access_tokens))
 
-        executor = ThreadPoolExecutor(max_workers=max_workers)
+        # 复用实例级线程池，避免每次调用新建 executor 造成线程残留累积
         try:
             futures = {
-                executor.submit(
+                self._refresh_executor.submit(
                     self.fetch_remote_info, token, "refresh_accounts", defer_invalid_removal, use_cache
                 ): token
                 for token in access_tokens
@@ -1755,7 +1756,6 @@ class AccountService:
                 try:
                     account = future.result()
                 except (KeyboardInterrupt, SystemExit):
-                    executor.shutdown(wait=False, cancel_futures=True)
                     raise
                 except Exception as exc:
                     error_str = str(exc)
@@ -1786,10 +1786,7 @@ class AccountService:
         except (KeyboardInterrupt, SystemExit):
             if progress_id:
                 self.finish_refresh_progress(progress_id, error="cancelled")
-            executor.shutdown(wait=False, cancel_futures=True)
             raise
-        else:
-            executor.shutdown(wait=True, cancel_futures=True)
 
         # 自动重新登录异常账号（仅当配置开启时）
         relogined = 0
