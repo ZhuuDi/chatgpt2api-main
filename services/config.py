@@ -392,6 +392,21 @@ class ConfigStore:
             return 30
 
     @property
+    def image_retention_hours(self) -> float:
+        """本地图片保留时长（小时），默认 4 小时；超过后由后台分批自动删除。
+
+        优先读取显式配置 image_retention_hours；未配置时默认 4 小时
+        （image_retention_days 仅保留用于兼容旧字段，清理逻辑以小时为准）。
+        """
+        raw = self.data.get("image_retention_hours")
+        if raw is not None:
+            try:
+                return max(0.0, float(raw))
+            except (TypeError, ValueError):
+                pass
+        return 4.0
+
+    @property
     def image_auto_cleanup_enabled(self) -> bool:
         """是否启用图片空间自动清理（剩余空间低于阈值时删除最旧图片）。"""
         value = self.data.get("image_auto_cleanup_enabled", True)
@@ -657,8 +672,8 @@ class ConfigStore:
         batch_interval_secs: float = 0.0,
         max_batches: int | None = None,
     ) -> int:
-        """删除超过保留天数的旧图片；支持分批删除避免一次性大量删除卡顿。"""
-        cutoff = time.time() - self.image_retention_days * 86400
+        """删除超过保留时长的旧图片；支持分批删除避免一次性大量删除卡顿。"""
+        cutoff = time.time() - self.image_retention_hours * 3600
         files = sorted(
             (p for p in self.images_dir.rglob("*") if p.is_file() and p.stat().st_mtime < cutoff),
             key=lambda p: p.stat().st_mtime,
@@ -710,6 +725,7 @@ class ConfigStore:
         data = dict(self.data)
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
         data["image_retention_days"] = self.image_retention_days
+        data["image_retention_hours"] = self.image_retention_hours
         data["image_auto_cleanup_enabled"] = self.image_auto_cleanup_enabled
         data["image_min_free_mb"] = self.image_min_free_mb
         data["image_cleanup_batch_size"] = self.image_cleanup_batch_size
