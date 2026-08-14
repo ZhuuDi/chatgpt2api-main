@@ -142,22 +142,47 @@ class LogService:
         except Exception:
             pass
 
+    def _read_tail_lines(self, max_bytes: int | None = None) -> list[str]:
+        """从文件尾部读取最近若干行，避免全量加载大日志。
+
+        - max_bytes=None：读取整个文件（兼容小文件与兜底）；
+        - 否则只读文件末尾最多 max_bytes 字节，首行若被截断则丢弃，
+          保证返回的都是完整行。
+        """
+        if not self.path.exists() or self.path.stat().st_size == 0:
+            return []
+        size = self.path.stat().st_size
+        if max_bytes is None or size <= max_bytes:
+            return self.path.read_text(encoding="utf-8").splitlines()
+        with self.path.open("rb") as f:
+            f.seek(size - max_bytes)
+            data = f.read()
+        lines = data.decode("utf-8", "replace").splitlines()
+        if lines:
+            lines = lines[1:]  # 丢弃可能被截断的首行
+        return lines
+
     def list(self, type: str = "", start_date: str = "", end_date: str = "", limit: int = 200) -> list[dict[str, Any]]:
         self.flush()
         if not self.path.exists():
             return []
-        items: list[dict[str, Any]] = []
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        for line_number in range(len(lines) - 1, -1, -1):
-            item = self._parse_line(lines[line_number], line_number)
-            if item is None:
-                continue
-            if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
-                continue
-            items.append(item)
-            if len(items) >= limit:
-                break
-        return items
+        # 优先只读尾部（5MB），若尾部解析不出条目（如文件末尾为异常数据），
+        # 逐级扩大读取范围直到找到条目或读完整份文件。
+        for max_bytes in (5 * 1024 * 1024, 20 * 1024 * 1024, None):
+            lines = self._read_tail_lines(max_bytes)
+            items: list[dict[str, Any]] = []
+            for line_number in range(len(lines) - 1, -1, -1):
+                item = self._parse_line(lines[line_number], line_number)
+                if item is None:
+                    continue
+                if not self._matches_filters(item, type=type, start_date=start_date, end_date=end_date):
+                    continue
+                items.append(item)
+                if len(items) >= limit:
+                    return items
+            if items:
+                return items
+        return []
 
     def delete(self, ids: list[str]) -> dict[str, int]:
         self.flush()
