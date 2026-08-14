@@ -215,7 +215,12 @@ class ImageStorageService:
         if mode in {"local", "both"}:
             path = _local_image_path(rel)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(image_data)
+            try:
+                path.write_bytes(image_data)
+            except FileNotFoundError:
+                # 并发清理可能刚删除了空目录：重建目录后重试一次
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(image_data)
             stored_local = True
 
         if mode in {"webdav", "both"}:

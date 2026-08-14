@@ -698,9 +698,12 @@ class ConfigStore:
                         pass
                 if batch_interval_secs > 0 and (batch_index + 1) * batch_size < len(files):
                     time.sleep(max(0.0, float(batch_interval_secs)))
+        # 只删除超过 24 小时的空目录：避免与生图保存（mkdir 后写文件）并发时
+        # 误删刚创建的目录导致保存图片报 No such file
         for path in sorted((p for p in self.images_dir.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
             try:
-                path.rmdir()
+                if time.time() - path.stat().st_mtime > 86400:
+                    path.rmdir()
             except OSError:
                 pass
         return removed
