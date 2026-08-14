@@ -19,6 +19,31 @@ from utils.log import logger
 THUMBNAIL_SIZE = (320, 320)
 
 
+# 图片统计/列表短缓存：避免页面频繁刷新时每次全盘遍历（TTL 5 秒）
+_IMAGE_QUERY_CACHE: dict[str, tuple[float, object]] = {}
+_IMAGE_QUERY_CACHE_TTL = 5.0
+
+
+def _image_cache_get(key: str) -> object | None:
+    entry = _IMAGE_QUERY_CACHE.get(key)
+    if entry is None:
+        return None
+    ts, result = entry
+    if time.time() - ts > _IMAGE_QUERY_CACHE_TTL:
+        _IMAGE_QUERY_CACHE.pop(key, None)
+        return None
+    return result
+
+
+def _image_cache_set(key: str, result: object) -> None:
+    _IMAGE_QUERY_CACHE[key] = (time.time(), result)
+
+
+def invalidate_image_query_cache() -> None:
+    """图片新增/删除后调用，避免缓存残留过期统计。"""
+    _IMAGE_QUERY_CACHE.clear()
+
+
 def _cleanup_empty_dirs(root: Path) -> None:
     for path in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
         try:
@@ -149,6 +174,10 @@ def cleanup_image_thumbnails() -> int:
     return removed
 
 def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict[str, object]:
+    key = ("list_images", base_url, start_date, end_date)
+    cached = _image_cache_get(key)
+    if cached is not None:
+        return dict(cached) if isinstance(cached, dict) else cached  # type: ignore[return-value]
     config.cleanup_old_images()
     cleanup_image_thumbnails()
     all_tags = load_tags()
@@ -164,7 +193,9 @@ def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict
     groups: dict[str, list[dict[str, object]]] = {}
     for item in items:
         groups.setdefault(str(item["date"]), []).append(item)
-    return {"items": items, "groups": [{"date": key, "items": value} for key, value in groups.items()]}
+    result: dict[str, object] = {"items": items, "groups": [{"date": key, "items": value} for key, value in groups.items()]}
+    _image_cache_set(key, result)
+    return result
 
 
 def delete_images(paths: list[str] | None = None, start_date: str = "", end_date: str = "", all_matching: bool = False) -> dict[str, int]:
@@ -188,6 +219,8 @@ def delete_images(paths: list[str] | None = None, start_date: str = "", end_date
         remove_tags(item)
     _cleanup_empty_dirs(root)
     _cleanup_empty_dirs(config.image_thumbnails_dir)
+    if removed:
+        invalidate_image_query_cache()
     return {"removed": removed}
 
 
@@ -228,6 +261,9 @@ def download_images_zip(paths: list[str]) -> io.BytesIO:
     buf.seek(0)
     return buf
 def storage_stats() -> dict:
+    cached = _image_cache_get("storage_stats")
+    if cached is not None:
+        return dict(cached) if isinstance(cached, dict) else cached  # type: ignore[return-value]
     import shutil
     usage = shutil.disk_usage(config.images_dir)
     total_mb = usage.total // (1024 * 1024)
@@ -241,7 +277,7 @@ def storage_stats() -> dict:
             image_count += 1
             image_size += p.stat().st_size
 
-    return {
+    result = {
         "disk_total_mb": total_mb,
         "disk_used_mb": used_mb,
         "disk_free_mb": free_mb,
@@ -249,6 +285,8 @@ def storage_stats() -> dict:
         "image_size_mb": image_size // (1024 * 1024),
         "image_size_bytes": image_size,
     }
+    _image_cache_set("storage_stats", result)
+    return result
 
 
 def compress_images(quality: int = 60) -> dict:
@@ -333,6 +371,8 @@ def delete_to_target(
     if not dry_run:
         _cleanup_empty_dirs(config.images_dir)
         _cleanup_empty_dirs(config.image_thumbnails_dir)
+        if removed:
+            invalidate_image_query_cache()
 
     return {
         "removed": removed,
