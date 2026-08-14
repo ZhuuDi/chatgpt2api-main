@@ -1529,21 +1529,26 @@ class AccountService:
 
         active_token = self.refresh_access_token(access_token, event=f"{event}:preflight") or access_token
         try:
-            from services.openai_backend_api import InvalidAccessTokenError, OpenAIBackendAPI
-            backend = OpenAIBackendAPI(active_token)
+            from services.backend_pool import backend_pool
+            from services.openai_backend_api import InvalidAccessTokenError
+            # 探测复用账号级 Session 池，避免每账号每次探测新建 curl Session
+            # 造成的线程/内存/FD 累积（高账号规模下探测频率高时尤其明显）
+            backend = backend_pool.acquire(active_token)
             try:
                 result = backend.get_user_info()
             finally:
-                backend.close()
+                backend_pool.release(active_token, backend)
         except InvalidAccessTokenError as exc:
             refreshed_token = self.refresh_access_token(active_token, force=True, event=f"{event}:invalid_access_token")
             if refreshed_token and refreshed_token != active_token:
+                # token 轮换后旧账号的池实例失效，关闭防止复用旧连接
+                backend_pool.invalidate(active_token)
                 try:
-                    backend = OpenAIBackendAPI(refreshed_token)
+                    backend = backend_pool.acquire(refreshed_token)
                     try:
                         result = backend.get_user_info()
                     finally:
-                        backend.close()
+                        backend_pool.release(refreshed_token, backend)
                 except InvalidAccessTokenError as retry_exc:
                     if self._record_invalid_token_seen(
                         refreshed_token,
