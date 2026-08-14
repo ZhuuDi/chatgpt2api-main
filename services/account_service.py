@@ -1134,20 +1134,36 @@ class AccountService:
         with self._lock:
             return int(sum(self._image_inflight.values()))
 
-    def list_accounts(self) -> list[dict]:
-        """返回所有账号的副本，并为每个账号附加当前图片在途数 image_inflight。
+    def list_accounts(self, limit: int = 0, offset: int = 0) -> list[dict]:
+        """返回账号副本列表（可选分页），并为每个账号附加当前图片在途数 image_inflight。
 
+        - limit<=0 或 offset<=0：返回全部（兼容原行为）；
+        - 分页在锁内切片，避免账号上千时每次都构造全量副本再传输。
         image_inflight 为内存态并发计数(账号正在生成、尚未结束的图片数)。号池空闲时
         若某账号该值持续 > 0，说明其并发槽位泄漏、已被静默排除出调度，可借此在 UI 上诊断。
         """
+        limit = max(0, int(limit or 0))
+        offset = max(0, int(offset or 0))
         with self._lock:
             result = []
+            index = 0
             for item in self._accounts.values():
+                if limit > 0 and index < offset:
+                    index += 1
+                    continue
+                if limit > 0 and len(result) >= limit:
+                    break
+                index += 1
                 account = dict(item)
                 token = account.get("access_token") or ""
                 account["image_inflight"] = int(self._image_inflight.get(token, 0))
                 result.append(account)
             return result
+
+    def accounts_total(self) -> int:
+        """当前号池账号总数（锁内计数，供分页接口使用）。"""
+        with self._lock:
+            return len(self._accounts)
 
     def list_limited_tokens(self) -> list[str]:
         with self._lock:

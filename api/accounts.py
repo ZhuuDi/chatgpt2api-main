@@ -9,7 +9,7 @@ import zipfile
 from datetime import datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
@@ -210,9 +210,20 @@ def create_router() -> APIRouter:
         return {"items": auth_service.list_keys(role="user")}
 
     @router.get("/api/accounts")
-    async def get_accounts(authorization: str | None = Header(default=None)):
+    async def get_accounts(
+        authorization: str | None = Header(default=None),
+        limit: int = Query(default=0, ge=0),
+        offset: int = Query(default=0, ge=0),
+    ):
         require_admin(authorization)
-        return {"items": account_service.list_accounts()}
+        items = account_service.list_accounts(limit=limit, offset=offset)
+        total = account_service.accounts_total()
+        return {
+            "items": items,
+            "total": total,
+            "limit": limit if limit > 0 else total,
+            "offset": offset,
+        }
 
     @router.post("/api/accounts")
     async def create_accounts(body: AccountCreateRequest, authorization: str | None = Header(default=None)):
