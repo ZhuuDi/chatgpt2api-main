@@ -60,6 +60,19 @@ export type Model = {
 
 type AccountListResponse = {
   items: Account[];
+  total: number;
+  limit: number;
+  offset: number;
+  summary?: {
+    total: number;
+    active: number;
+    limited: number;
+    abnormal: number;
+    disabled: number;
+    unprobed: number;
+    total_quota: number;
+    by_type?: Record<string, number>;
+  };
 };
 
 type ModelListResponse = {
@@ -72,6 +85,7 @@ type AccountMutationResponse = {
   added?: number;
   skipped?: number;
   removed?: number;
+  background_probe?: boolean;
   refreshed?: number;
   relogined?: number;
   errors?: Array<{ access_token: string; error: string }>;
@@ -345,8 +359,21 @@ export async function login(authKey: string) {
   });
 }
 
-export async function fetchAccounts() {
-  return httpRequest<AccountListResponse>("/api/accounts");
+export async function fetchAccounts(params?: {
+  limit?: number;
+  offset?: number;
+  status?: string;
+  type?: string;
+  search?: string;
+}) {
+  const query = new URLSearchParams();
+  if (params?.limit) query.set("limit", String(params.limit));
+  if (params?.offset) query.set("offset", String(params.offset));
+  if (params?.status) query.set("status", params.status);
+  if (params?.type) query.set("type", params.type);
+  if (params?.search) query.set("search", params.search);
+  const qs = query.toString();
+  return httpRequest<AccountListResponse>(`/api/accounts${qs ? `?${qs}` : ""}`);
 }
 
 export async function fetchModels() {
@@ -381,11 +408,20 @@ export async function finishOAuthLogin(sessionId: string, callback: string) {
   });
 }
 
-export async function deleteAccounts(tokens: string[]) {
+export async function deleteAccounts(tokens: string[], allAbnormal = false) {
   return httpRequest<AccountMutationResponse>("/api/accounts", {
     method: "DELETE",
-    body: { tokens },
+    body: { tokens, all_abnormal: allAbnormal },
   });
+}
+
+export async function exportAccounts(tokens: string[], format: "json" | "zip" = "json") {
+  const response = await request.post(
+    "/api/accounts/export",
+    { access_tokens: tokens, format },
+    { responseType: "blob" },
+  );
+  return response.data as Blob;
 }
 
 export async function refreshAccounts(accessTokens: string[]) {
