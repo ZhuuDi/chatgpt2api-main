@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import mimetypes
 from contextlib import asynccontextmanager
 from threading import Event
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 
 from api import accounts, ai, image_tasks, system
 from api.errors import install_exception_handlers
-from api.support import resolve_web_asset, start_limited_account_watcher
+from api.support import get_web_asset_content, start_limited_account_watcher
 from services.backup_service import backup_service
 from services.account_service import account_service
 from services.config import config
@@ -54,14 +55,15 @@ def create_app() -> FastAPI:
 
     @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def serve_web(full_path: str):
-        asset = resolve_web_asset(full_path)
+        asset = get_web_asset_content(full_path)
         if asset is not None:
-            return FileResponse(asset)
+            media_type = mimetypes.guess_type(asset[0])[0] or "application/octet-stream"
+            return Response(content=asset[1], media_type=media_type)
         if full_path.strip("/").startswith("_next/"):
             raise HTTPException(status_code=404, detail="Not Found")
-        fallback = resolve_web_asset("")
+        fallback = get_web_asset_content("")
         if fallback is None:
             raise HTTPException(status_code=404, detail="Not Found")
-        return FileResponse(fallback)
+        return Response(content=fallback[1], media_type="text/html")
 
     return app

@@ -130,3 +130,25 @@ def resolve_web_asset(requested_path: str) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+# 静态资源内存缓存：静态文件不会变化，首次读盘后驻留内存，
+# 避免在 HDD/高并发写盘场景下每次请求都读盘导致响应被卡数十秒。
+_WEB_ASSET_CACHE: dict[str, tuple[str, bytes]] = {}
+
+
+def get_web_asset_content(requested_path: str) -> tuple[str, bytes] | None:
+    """返回 web 静态资源 (文件名, 内容)。优先内存缓存，未命中再读盘并缓存。"""
+    clean_path = requested_path.strip("/")
+    key = clean_path or "index.html"
+    cached = _WEB_ASSET_CACHE.get(key)
+    if cached is not None:
+        return cached
+    path = resolve_web_asset(requested_path)
+    if path is None:
+        return None
+    item = (path.name, path.read_bytes())
+    # 控制缓存大小（防御性上限，避免异常路径无限增长）
+    if len(_WEB_ASSET_CACHE) < 512:
+        _WEB_ASSET_CACHE[key] = item
+    return item
