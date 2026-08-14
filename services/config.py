@@ -475,7 +475,7 @@ class ConfigStore:
         客户端超时 = 180 + 60 = 240 秒，由下游客户端控制；服务端总预算必须小于客户端超时。
         """
         try:
-            return max(1, int(self.data.get("image_total_timeout_secs", 180)))
+            return max(1, int(self.data.get("image_total_timeout_secs", 240)))
         except (TypeError, ValueError):
             return 180
 
