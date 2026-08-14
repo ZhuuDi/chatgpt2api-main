@@ -21,7 +21,7 @@ THUMBNAIL_SIZE = (320, 320)
 
 # 图片统计/列表短缓存：避免页面频繁刷新时每次全盘遍历（TTL 5 秒）
 _IMAGE_QUERY_CACHE: dict[str, tuple[float, object]] = {}
-_IMAGE_QUERY_CACHE_TTL = 5.0
+_IMAGE_QUERY_CACHE_TTL = 30.0
 
 
 def _image_cache_get(key: str) -> object | None:
@@ -275,12 +275,11 @@ def storage_stats() -> dict:
     used_mb = usage.used // (1024 * 1024)
     free_mb = usage.free // (1024 * 1024)
 
-    image_count = 0
-    image_size = 0
-    for p in config.images_dir.rglob("*"):
-        if p.is_file():
-            image_count += 1
-            image_size += p.stat().st_size
+    # 图片数量与大小从索引统计，避免每次缓存过期全盘 rglob+stat
+    # （3924 张图实测约 7 秒，会周期性拖慢图片页与整体响应）
+    indexed = image_storage_service._load_clean_index()
+    image_count = len(indexed)
+    image_size = sum(int(item.get("size") or 0) for item in indexed.values())
 
     result = {
         "disk_total_mb": total_mb,
