@@ -33,3 +33,5 @@ git_cache/
 loginwithpassword_*/
 logwithemailverifycode_*/
 test_batch_output/
+# 本地 npm 生成（项目使用 bun.lock）
+web/package-lock.json
