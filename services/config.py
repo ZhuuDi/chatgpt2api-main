@@ -516,7 +516,7 @@ class ConfigStore:
     def account_probe_rate_per_minute(self) -> int:
         """账号后台探测速率（个/分钟），默认 120（约 2 个/秒），按上游承受力配置。"""
         try:
-            return max(1, int(self.data.get("account_probe_rate_per_minute", 120)))
+            return max(1, int(self.data.get("account_probe_rate_per_minute", 60)))
         except (TypeError, ValueError):
             return 120
 
@@ -532,7 +532,7 @@ class ConfigStore:
     def account_probe_tick_secs(self) -> float:
         """账号探测节流循环的 tick 间隔（秒），默认 5 秒，每个 tick 探测 rate*tick/60 个账号。"""
         try:
-            return max(1.0, float(self.data.get("account_probe_tick_secs", 5.0)))
+            return max(1.0, float(self.data.get("account_probe_tick_secs", 10.0)))
         except (TypeError, ValueError):
             return 5.0
 

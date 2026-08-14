@@ -61,7 +61,7 @@ class AccountService:
         # 落盘合并控制：脏标记 + 合并窗口（默认 1s），关键变更（删除/封禁）立即落盘
         self._dirty = False
         self._flush_scheduled = False
-        self._flush_interval = 1.0
+        self._flush_interval = 5.0
 
     def _get_cumulative_file(self) -> Path:
         from services.config import DATA_DIR
