@@ -92,7 +92,7 @@ class LogService:
 
     def _flush_loop(self) -> None:
         while True:
-            time.sleep(0.1)
+            time.sleep(0.5)
             try:
                 self._flush()
             except Exception:
