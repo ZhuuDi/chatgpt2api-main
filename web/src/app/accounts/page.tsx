@@ -269,6 +269,21 @@ function AccountsPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query, statusFilter, typeFilter, page, pageSize]);
 
+  // 自动静默刷新：后台探测更新账号状态后，页面自动反映最新数据。
+  // 每 20s 一次；页面不可见（后台标签页）时暂停，不产生无谓请求。
+  const loadAccountsRef = useRef(loadAccounts);
+  loadAccountsRef.current = loadAccounts;
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.hidden) {
+        return;
+      }
+      void loadAccountsRef.current(true);
+    }, 20000);
+    return () => window.clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 后端已按筛选条件分页返回，前端不再二次过滤
   const filteredAccounts = accounts;
 
