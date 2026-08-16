@@ -428,12 +428,21 @@ def _auto_cleanup_worker(stop_event: threading.Event) -> None:
     import shutil
     while not stop_event.wait(1800):  # 每30分钟
         try:
-            config.cleanup_old_images(
-                batch_size=config.image_cleanup_batch_size,
-                batch_interval_secs=config.image_cleanup_batch_interval_secs,
-                max_batches=config.image_cleanup_max_batches_per_run,
-            )
-            cleanup_image_thumbnails()
+            from services.maintenance import MAINTENANCE_LOCK, generation_busy
+            if generation_busy() or not MAINTENANCE_LOCK.acquire(blocking=False):
+                continue
+            try:
+                config.cleanup_old_images(
+                    batch_size=config.image_cleanup_batch_size,
+                    batch_interval_secs=config.image_cleanup_batch_interval_secs,
+                    max_batches=config.image_cleanup_max_batches_per_run,
+                )
+                _cleanup_image_thumbnails_unlocked()
+            finally:
+                try:
+                    MAINTENANCE_LOCK.release()
+                except Exception:
+                    pass
             if not config.image_auto_cleanup_enabled:
                 continue
             usage = shutil.disk_usage(config.images_dir)

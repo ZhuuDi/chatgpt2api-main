@@ -466,40 +466,56 @@ class BackupService:
         return detail
 
     def run_backup(self, *, trigger: str = "manual") -> dict[str, object]:
-        with self._lock:
-            current = self.get_status()
-            if self._running:
-                raise BackupError("当前已有备份任务正在执行")
-            started_at = _iso_now()
-            self._running = True
-            save_backup_state({
-                "last_started_at": started_at,
-                "last_finished_at": current.get("last_finished_at"),
-                "last_status": "idle",
-                "last_error": None,
-                "last_object_key": current.get("last_object_key"),
-            })
+        # 与图片清理等重 I/O 维护任务互斥，生图高峰期避让，避免同时扫盘造成 HDD 风暴
+        maintenance_acquired = False
         try:
-            result = self._run_backup_once(trigger=trigger)
-            save_backup_state({
-                "last_started_at": started_at,
-                "last_finished_at": _iso_now(),
-                "last_status": "success",
-                "last_error": None,
-                "last_object_key": result["key"],
-            })
-            return result
-        except Exception as exc:
-            save_backup_state({
-                "last_started_at": started_at,
-                "last_finished_at": _iso_now(),
-                "last_status": "error",
-                "last_error": str(exc) or exc.__class__.__name__,
-                "last_object_key": current.get("last_object_key"),
-            })
-            raise
+            from services.maintenance import MAINTENANCE_LOCK, generation_busy
+            if generation_busy() or not MAINTENANCE_LOCK.acquire(blocking=False):
+                return {"ok": False, "skipped": True, "error": "maintenance busy or generation peak"}
+            maintenance_acquired = True
+        except Exception:
+            return {"ok": False, "skipped": True, "error": "maintenance lock unavailable"}
+        try:
+            with self._lock:
+                current = self.get_status()
+                if self._running:
+                    raise BackupError("当前已有备份任务正在执行")
+                started_at = _iso_now()
+                self._running = True
+                save_backup_state({
+                    "last_started_at": started_at,
+                    "last_finished_at": current.get("last_finished_at"),
+                    "last_status": "idle",
+                    "last_error": None,
+                    "last_object_key": current.get("last_object_key"),
+                })
+            try:
+                result = self._run_backup_once(trigger=trigger)
+                save_backup_state({
+                    "last_started_at": started_at,
+                    "last_finished_at": _iso_now(),
+                    "last_status": "success",
+                    "last_error": None,
+                    "last_object_key": result["key"],
+                })
+                return result
+            except Exception as exc:
+                save_backup_state({
+                    "last_started_at": started_at,
+                    "last_finished_at": _iso_now(),
+                    "last_status": "error",
+                    "last_error": str(exc) or exc.__class__.__name__,
+                    "last_object_key": current.get("last_object_key"),
+                })
+                raise
+            finally:
+                self._running = False
         finally:
-            self._running = False
+            if maintenance_acquired:
+                try:
+                    MAINTENANCE_LOCK.release()
+                except Exception:
+                    pass
 
     def _run_backup_once(self, *, trigger: str) -> dict[str, object]:
         settings = config.get_backup_settings()
