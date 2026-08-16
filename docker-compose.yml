@@ -11,6 +11,12 @@ services:
     environment:
       # 存储后端配置 (可选值: json, sqlite, postgres, git)
        - STORAGE_BACKEND=json
+
+      # glibc 内存优化：限制 malloc arena 数量（默认 8*CPU=64 个，每个 64MB，
+      # 高并发多线程下释放后不归还 OS，导致容器 RSS 长期居高不下）
+      # 6 个 arena 覆盖 150 生图并发 + 后台任务足够，配合 trim 阈值积极归还空闲内存
+       - MALLOC_ARENA_MAX=6
+       - MALLOC_TRIM_THRESHOLD=65536
       
       # 数据库配置 (当 STORAGE_BACKEND=sqlite/postgres 时使用)
       # - DATABASE_URL=postgresql://user:password@host:5432/dbname
