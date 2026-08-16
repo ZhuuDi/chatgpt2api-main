@@ -16,6 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from services.config import DATA_DIR, config
+from services.generation_executor import GenerationPoolFullError, generation_executor
 from services.protocol.error_response import anthropic_error_response, openai_error_response
 from utils.helper import anthropic_sse_stream, sse_json_stream
 
@@ -325,46 +326,96 @@ class LoggedCall:
     async def run(self, handler, *args, sse: str = "openai"):
         from services.protocol.conversation import ImageGenerationError
 
+        # 生图请求走独立执行器，与网页 API 的 anyio 线程池完全分离；
+        # 非生图请求保持原有 run_in_threadpool 行为
+        is_image = self.endpoint.startswith("/v1/images")
+        acquired = False
+        if is_image:
+            try:
+                generation_executor.acquire()
+                acquired = True
+            except GenerationPoolFullError as exc:
+                self.log("调用失败", status="failed", error=str(exc))
+                return openai_error_response({
+                    "error": {
+                        "message": str(exc),
+                        "type": "rate_limit_error",
+                        "param": None,
+                        "code": "image_generation_queue_full",
+                    }
+                }, 429)
         try:
-            result = await run_in_threadpool(handler, *args)
-        except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""))
-            return _image_error_response(exc)
-        except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
-            raise
-        except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
-            if self.endpoint.startswith("/v1/images"):
+            try:
+                if is_image:
+                    # 排队等待也计入单请求总预算（total + 30s 兜底），避免客户端超时后服务端仍无限排队
+                    result = await generation_executor.run(
+                        handler, *args, timeout=float(config.image_total_timeout_secs) + 30.0
+                    )
+                else:
+                    result = await run_in_threadpool(handler, *args)
+            except ImageGenerationError as exc:
+                self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+                         conversation_id=getattr(exc, "conversation_id", ""))
                 return _image_error_response(exc)
-            return _protocol_error_response(exc, 502, sse)
+            except HTTPException as exc:
+                self.log("调用失败", status="failed", error=str(exc.detail))
+                raise
+            except Exception as exc:
+                self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+                if self.endpoint.startswith("/v1/images"):
+                    return _image_error_response(exc)
+                return _protocol_error_response(exc, 502, sse)
 
-        if isinstance(result, dict):
-            self.log("调用完成", result)
-            response = dict(result)
-            response.pop("_account_email", None)
-            return response
+            if isinstance(result, dict):
+                self.log("调用完成", result)
+                response = dict(result)
+                response.pop("_account_email", None)
+                return response
 
-        sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
-        try:
-            has_first, first = await run_in_threadpool(_next_item, result)
-        except ImageGenerationError as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
-                     conversation_id=getattr(exc, "conversation_id", ""))
-            return _image_error_response(exc)
-        except HTTPException as exc:
-            self.log("调用失败", status="failed", error=str(exc.detail))
-            raise
-        except Exception as exc:
-            self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
-            if self.endpoint.startswith("/v1/images"):
+            sender = anthropic_sse_stream if sse == "anthropic" else sse_json_stream
+            try:
+                if is_image:
+                    has_first, first = await generation_executor.run(_next_item, result)
+                else:
+                    has_first, first = await run_in_threadpool(_next_item, result)
+            except ImageGenerationError as exc:
+                self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""),
+                         conversation_id=getattr(exc, "conversation_id", ""))
                 return _image_error_response(exc)
-            return _protocol_error_response(exc, 502, sse)
-        if not has_first:
-            self.log("流式调用结束")
-            return StreamingResponse(sender(()), media_type="text/event-stream")
-        return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+            except HTTPException as exc:
+                self.log("调用失败", status="failed", error=str(exc.detail))
+                raise
+            except Exception as exc:
+                self.log("调用失败", status="failed", error=str(exc), account_email=getattr(exc, "account_email", ""))
+                if self.endpoint.startswith("/v1/images"):
+                    return _image_error_response(exc)
+                return _protocol_error_response(exc, 502, sse)
+            if not has_first:
+                self.log("流式调用结束")
+                return StreamingResponse(sender(()), media_type="text/event-stream")
+
+            if is_image:
+                async def _stream_async():
+                    nonlocal acquired
+                    try:
+                        items = self.stream(itertools.chain([first], result))
+                        while True:
+                            has_next, item = await generation_executor.run(_next_item, items)
+                            if not has_next:
+                                break
+                            yield sender(item)
+                    finally:
+                        # 流式结束后才归还生图池额度
+                        if acquired:
+                            acquired = False
+                            generation_executor.release()
+
+                return StreamingResponse(_stream_async(), media_type="text/event-stream")
+
+            return StreamingResponse(sender(self.stream(itertools.chain([first], result))), media_type="text/event-stream")
+        finally:
+            if acquired:
+                generation_executor.release()
 
     def stream(self, items):
         urls: list[str] = []

@@ -33,6 +33,8 @@ export function ConfigCard() {
   const setImageTimeoutRetrySecs = useSettingsStore((state) => state.setImageTimeoutRetrySecs);
   const setImageTotalTimeoutSecs = useSettingsStore((state) => state.setImageTotalTimeoutSecs);
   const setExecutorMaxWorkers = useSettingsStore((state) => state.setExecutorMaxWorkers);
+  const setImageGenerationMaxWorkers = useSettingsStore((state) => state.setImageGenerationMaxWorkers);
+  const setImageGenerationQueueSize = useSettingsStore((state) => state.setImageGenerationQueueSize);
   const setImageRetryBudget = useSettingsStore((state) => state.setImageRetryBudget);
   const setAccountProbeRatePerMinute = useSettingsStore((state) => state.setAccountProbeRatePerMinute);
   const setAccountProbeMinIntervalSecs = useSettingsStore((state) => state.setAccountProbeMinIntervalSecs);
@@ -341,6 +343,26 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">0=不限制（默认，并发由下游调用方控制）；设置正整数可作为部署期资源保护。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">生图并发执行上限</label>
+            <Input
+              value={String(config?.image_generation_max_workers ?? "")}
+              onChange={(event) => setImageGenerationMaxWorkers(event.target.value)}
+              placeholder="100"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">生图专用线程池同时执行的任务数（默认 100），不影响网页响应。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">生图队列上限</label>
+            <Input
+              value={String(config?.image_generation_queue_size ?? "")}
+              onChange={(event) => setImageGenerationQueueSize(event.target.value)}
+              placeholder="300"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">执行中+排队请求上限（默认 300），超过返回 429 让下游退避。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">单请求总重试预算</label>

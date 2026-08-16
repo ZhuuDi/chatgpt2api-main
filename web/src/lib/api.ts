@@ -193,6 +193,8 @@ export type SettingsConfig = {
   image_timeout_retry_secs?: number | string;
   image_total_timeout_secs?: number | string;
   executor_max_workers?: number | string;
+  image_generation_max_workers?: number | string;
+  image_generation_queue_size?: number | string;
   image_retry_budget?: number | string;
   account_probe_rate_per_minute?: number | string;
   account_probe_min_interval_secs?: number | string;

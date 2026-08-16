@@ -452,6 +452,22 @@ class ConfigStore:
             return 10
 
     @property
+    def image_generation_max_workers(self) -> int:
+        """生图专用线程池同时执行上限；默认 100，可由设置页调整（不写死并发数字）。"""
+        try:
+            return max(1, int(self.data.get("image_generation_max_workers", 100)))
+        except (TypeError, ValueError):
+            return 100
+
+    @property
+    def image_generation_queue_size(self) -> int:
+        """生图在途（执行中 + 排队）请求上限；超过直接快速失败，避免无限堆积。"""
+        try:
+            return max(1, int(self.data.get("image_generation_queue_size", 300)))
+        except (TypeError, ValueError):
+            return 300
+
+    @property
     def image_poll_timeout_secs(self) -> int:
         try:
             return max(1, int(self.data.get("image_poll_timeout_secs", 120)))
@@ -764,6 +780,13 @@ class ConfigStore:
             thread.join(timeout=5.0)
 
     def _run_cleanup_batch(self) -> None:
+        # 生图高峰期避让 + 与备份/缩略图等重 I/O 维护任务互斥，避免 HDD I/O 风暴叠加
+        try:
+            from services.maintenance import MAINTENANCE_LOCK, generation_busy
+            if generation_busy() or not MAINTENANCE_LOCK.acquire(blocking=False):
+                return
+        except Exception:
+            return
         try:
             self.cleanup_old_images(
                 batch_size=self.image_cleanup_batch_size,
@@ -772,6 +795,11 @@ class ConfigStore:
             )
         except Exception:
             pass
+        finally:
+            try:
+                MAINTENANCE_LOCK.release()
+            except Exception:
+                pass
 
     @property
     def base_url(self) -> str:
@@ -799,6 +827,8 @@ class ConfigStore:
         data["image_cleanup_batch_size"] = self.image_cleanup_batch_size
         data["image_cleanup_batch_interval_secs"] = self.image_cleanup_batch_interval_secs
         data["image_cleanup_max_batches_per_run"] = self.image_cleanup_max_batches_per_run
+        data["image_generation_max_workers"] = self.image_generation_max_workers
+        data["image_generation_queue_size"] = self.image_generation_queue_size
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs

@@ -181,6 +181,8 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_timeout_retry_secs: Number(config.image_timeout_retry_secs || 30),
     image_total_timeout_secs: Number(config.image_total_timeout_secs || 180),
     executor_max_workers: Number(config.executor_max_workers || 0),
+    image_generation_max_workers: Number(config.image_generation_max_workers || 100),
+    image_generation_queue_size: Number(config.image_generation_queue_size || 300),
     image_retry_budget: Number(config.image_retry_budget || 5),
     account_probe_rate_per_minute: Number(config.account_probe_rate_per_minute || 120),
     account_probe_min_interval_secs: Number(config.account_probe_min_interval_secs || 300),
@@ -319,6 +321,8 @@ type SettingsStore = {
   setImageTimeoutRetrySecs: (value: string) => void;
   setImageTotalTimeoutSecs: (value: string) => void;
   setExecutorMaxWorkers: (value: string) => void;
+  setImageGenerationMaxWorkers: (value: string) => void;
+  setImageGenerationQueueSize: (value: string) => void;
   setImageRetryBudget: (value: string) => void;
   setAccountProbeRatePerMinute: (value: string) => void;
   setAccountProbeMinIntervalSecs: (value: string) => void;
@@ -453,6 +457,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
+        image_generation_max_workers: Math.max(1, Number(config.image_generation_max_workers) || 100),
+        image_generation_queue_size: Math.max(1, Number(config.image_generation_queue_size) || 300),
         image_settle_enabled: Boolean(config.image_settle_enabled !== false),
         image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
         image_remove_conversation_after_result: Boolean(config.image_remove_conversation_after_result),
@@ -596,6 +602,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setExecutorMaxWorkers: (value) => {
     set((state) => state.config ? { config: { ...state.config, executor_max_workers: value } } : {});
+  },
+
+  setImageGenerationMaxWorkers: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_generation_max_workers: value } } : {});
+  },
+
+  setImageGenerationQueueSize: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_generation_queue_size: value } } : {});
   },
 
   setImageRetryBudget: (value) => {
