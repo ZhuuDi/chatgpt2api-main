@@ -203,7 +203,9 @@ class ImageStorageService:
         return f"{relative_dir.as_posix()}/{filename}"
 
     def save(self, image_data: bytes, base_url: str | None = None) -> StoredImage:
-        config.cleanup_old_images()
+        # 触发式后台清理：不在保存热路径同步全量扫盘，避免高并发下 HDD I/O 风暴
+        # 以及并发清理重复 unlink 导致的 [Errno 2] No such file
+        config.request_cleanup_old_images()
         rel = self.make_relative_path(image_data)
         mode = self.mode()
         if mode not in {"local", "webdav", "both"}:

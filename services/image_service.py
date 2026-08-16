@@ -178,12 +178,8 @@ def list_images(base_url: str, start_date: str = "", end_date: str = "") -> dict
     cached = _image_cache_get(key)
     if cached is not None:
         return dict(cached) if isinstance(cached, dict) else cached  # type: ignore[return-value]
-    # 打开图片页时按批次清理过期图片，避免一次性大量删除造成卡顿（与后台 worker 同参数）
-    config.cleanup_old_images(
-        batch_size=config.image_cleanup_batch_size,
-        batch_interval_secs=config.image_cleanup_batch_interval_secs,
-        max_batches=config.image_cleanup_max_batches_per_run,
-    )
+    # 打开图片页改为触发式后台清理：避免同步全量扫盘阻塞事件循环
+    config.request_cleanup_old_images()
     cleanup_image_thumbnails()
     all_tags = load_tags()
     items = [

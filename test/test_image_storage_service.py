@@ -62,6 +62,7 @@ class ImageStorageServiceTests(unittest.TestCase):
         self.mock_config.images_dir = self.images_dir
         self.mock_config.base_url = "http://app.test"
         self.mock_config.cleanup_old_images.return_value = 0
+        self.mock_config.request_cleanup_old_images = mock.Mock()
         self.mock_config.get_image_storage_settings.side_effect = lambda: dict(self.settings)
         FakeWebDAVClient.uploaded = {}
         FakeWebDAVClient.deleted = []
@@ -75,6 +76,7 @@ class ImageStorageServiceTests(unittest.TestCase):
         self.assertEqual(stored.storage, "local")
         self.assertTrue((self.images_dir / stored.rel).is_file())
         self.assertEqual(stored.url, f"http://app.test/images/{stored.rel}")
+        self.mock_config.request_cleanup_old_images.assert_called_once()
 
     def test_webdav_mode_uploads_without_local_file(self):
         self.settings.update({

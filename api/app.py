@@ -34,6 +34,7 @@ def create_app() -> FastAPI:
             stop_event.set()
             thread.join(timeout=1)
             cleanup_thread.join(timeout=1)
+            config.stop_cleanup_worker()
             backup_service.stop()
             account_service.flush()
 

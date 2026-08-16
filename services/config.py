@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 import time
 
@@ -353,6 +354,12 @@ class ConfigStore:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         self.data = self._load()
         self._storage_backend: StorageBackend | None = None
+        # 图片清理并发协调：锁保证同时只有一个清理在执行，事件合并高并发下的清理触发
+        self._cleanup_lock = threading.Lock()
+        self._cleanup_event = threading.Event()
+        self._cleanup_stop = threading.Event()
+        self._cleanup_thread_lock = threading.Lock()
+        self._cleanup_thread: threading.Thread | None = None
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
                 "❌ auth-key 未设置！\n"
@@ -672,41 +679,99 @@ class ConfigStore:
         batch_interval_secs: float = 0.0,
         max_batches: int | None = None,
     ) -> int:
-        """删除超过保留时长的旧图片；支持分批删除避免一次性大量删除卡顿。"""
-        cutoff = time.time() - self.image_retention_hours * 3600
-        files = sorted(
-            (p for p in self.images_dir.rglob("*") if p.is_file() and p.stat().st_mtime < cutoff),
-            key=lambda p: p.stat().st_mtime,
-        )
-        removed = 0
-        if batch_size is None:
-            for path in files:
-                path.unlink()
-                removed += 1
-        else:
-            batch_size = max(1, int(batch_size))
-            max_batches = max_batches if max_batches is not None else (len(files) + batch_size - 1) // batch_size
-            for batch_index in range(max(0, int(max_batches))):
-                batch = files[batch_index * batch_size:(batch_index + 1) * batch_size]
-                if not batch:
-                    break
-                for path in batch:
+        """删除超过保留时长的旧图片；支持分批删除避免一次性大量删除卡顿。
+
+        全程持有清理锁：并发保存触发清理时串行执行，避免多线程对同一批旧文件
+        重复 unlink 抛出 FileNotFoundError 导致生图请求失败（曾导致大量 502）。
+        """
+        with self._cleanup_lock:
+            cutoff = time.time() - self.image_retention_hours * 3600
+            files = sorted(
+                (p for p in self.images_dir.rglob("*") if p.is_file() and p.stat().st_mtime < cutoff),
+                key=lambda p: p.stat().st_mtime,
+            )
+            removed = 0
+            if batch_size is None:
+                for path in files:
                     try:
                         path.unlink()
                         removed += 1
                     except OSError:
+                        # 并发清理可能已删除该文件，忽略即可
                         pass
-                if batch_interval_secs > 0 and (batch_index + 1) * batch_size < len(files):
-                    time.sleep(max(0.0, float(batch_interval_secs)))
-        # 只删除超过 24 小时的空目录：避免与生图保存（mkdir 后写文件）并发时
-        # 误删刚创建的目录导致保存图片报 No such file
-        for path in sorted((p for p in self.images_dir.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
-            try:
-                if time.time() - path.stat().st_mtime > 86400:
-                    path.rmdir()
-            except OSError:
-                pass
-        return removed
+            else:
+                batch_size = max(1, int(batch_size))
+                max_batches = max_batches if max_batches is not None else (len(files) + batch_size - 1) // batch_size
+                for batch_index in range(max(0, int(max_batches))):
+                    batch = files[batch_index * batch_size:(batch_index + 1) * batch_size]
+                    if not batch:
+                        break
+                    for path in batch:
+                        try:
+                            path.unlink()
+                            removed += 1
+                        except OSError:
+                            pass
+                    if batch_interval_secs > 0 and (batch_index + 1) * batch_size < len(files):
+                        time.sleep(max(0.0, float(batch_interval_secs)))
+            # 只删除超过 24 小时的空目录：避免与生图保存（mkdir 后写文件）并发时
+            # 误删刚创建的目录导致保存图片报 No such file
+            for path in sorted((p for p in self.images_dir.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
+                try:
+                    if time.time() - path.stat().st_mtime > 86400:
+                        path.rmdir()
+                except OSError:
+                    pass
+            return removed
+
+    def request_cleanup_old_images(self) -> None:
+        """触发式后台清理：合并高并发下的清理请求，避免保存热路径同步全量扫盘。
+
+        生图保存不再直接执行全量清理，而是标记一次清理请求；后台线程合并执行
+        （事件触发立即清理，空闲时每 60 秒兜底一次，保证保留期按时生效）。
+        """
+        self._cleanup_event.set()
+        self._ensure_cleanup_thread()
+
+    def _ensure_cleanup_thread(self) -> None:
+        with self._cleanup_thread_lock:
+            if self._cleanup_thread is not None and self._cleanup_thread.is_alive():
+                return
+            self._cleanup_thread = threading.Thread(
+                target=self._cleanup_trigger_loop,
+                name="image-cleanup-trigger",
+                daemon=True,
+            )
+            self._cleanup_thread.start()
+
+    def _cleanup_trigger_loop(self) -> None:
+        while not self._cleanup_stop.is_set():
+            # 空闲时每 60 秒兜底一次，事件触发时立即唤醒
+            self._cleanup_event.wait(timeout=60.0)
+            self._cleanup_event.clear()
+            self._run_cleanup_batch()
+            # 合并执行期间新到的触发，避免高频保存时反复全量扫描
+            while self._cleanup_event.is_set():
+                self._cleanup_event.clear()
+                self._run_cleanup_batch()
+
+    def stop_cleanup_worker(self) -> None:
+        """停止后台清理线程（测试与进程退出时调用，避免遗留线程操作真实数据目录）。"""
+        self._cleanup_stop.set()
+        self._cleanup_event.set()
+        thread = self._cleanup_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5.0)
+
+    def _run_cleanup_batch(self) -> None:
+        try:
+            self.cleanup_old_images(
+                batch_size=self.image_cleanup_batch_size,
+                batch_interval_secs=self.image_cleanup_batch_interval_secs,
+                max_batches=self.image_cleanup_max_batches_per_run,
+            )
+        except Exception:
+            pass
 
     @property
     def base_url(self) -> str:
