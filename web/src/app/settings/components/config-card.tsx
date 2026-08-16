@@ -349,10 +349,10 @@ export function ConfigCard() {
             <Input
               value={String(config?.image_generation_max_workers ?? "")}
               onChange={(event) => setImageGenerationMaxWorkers(event.target.value)}
-              placeholder="100"
+              placeholder="150"
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
-            <p className="text-xs text-stone-500">生图专用线程池同时执行的任务数（默认 100），不影响网页响应。</p>
+            <p className="text-xs text-stone-500">生图专用线程池同时执行的任务数（默认 150），不影响网页响应。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">生图队列上限</label>

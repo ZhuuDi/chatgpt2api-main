@@ -453,9 +453,9 @@ class ConfigStore:
 
     @property
     def image_generation_max_workers(self) -> int:
-        """生图专用线程池同时执行上限；默认 100，可由设置页调整（不写死并发数字）。"""
+        """生图专用线程池同时执行上限；默认 150，可由设置页调整（不写死并发数字）。"""
         try:
-            return max(1, int(self.data.get("image_generation_max_workers", 100)))
+            return max(1, int(self.data.get("image_generation_max_workers", 150)))
         except (TypeError, ValueError):
             return 100
 

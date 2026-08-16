@@ -29,7 +29,7 @@ class GenerationExecutor:
     def max_workers(self) -> int:
         try:
             from services.config import config
-            return max(1, int(config.image_generation_max_workers or 100))
+            return max(1, int(config.image_generation_max_workers or 150))
         except (TypeError, ValueError):
             return 100
 
