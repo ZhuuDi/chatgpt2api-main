@@ -100,7 +100,10 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/images")
     async def get_images(request: Request, start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return list_images(resolve_image_base_url(request), start_date=start_date.strip(), end_date=end_date.strip())
+        return await run_in_threadpool(
+            list_images, resolve_image_base_url(request),
+            start_date=start_date.strip(), end_date=end_date.strip(),
+        )
 
     @router.get("/images/{image_path:path}", include_in_schema=False)
     async def get_image(image_path: str):
@@ -108,17 +111,22 @@ def create_router(app_version: str) -> APIRouter:
 
     @router.get("/image-thumbnails/{image_path:path}", include_in_schema=False)
     async def get_image_thumbnail(image_path: str):
-        return get_thumbnail_response(image_path)
+        # 缩略图生成涉及 PIL 解码+写盘，放线程池避免阻塞事件循环
+        return await run_in_threadpool(get_thumbnail_response, image_path)
 
     @router.post("/api/images/delete")
     async def delete_images_endpoint(body: ImageDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return delete_images(body.paths, start_date=body.start_date.strip(), end_date=body.end_date.strip(), all_matching=body.all_matching)
+        return await run_in_threadpool(
+            delete_images, body.paths,
+            start_date=body.start_date.strip(), end_date=body.end_date.strip(),
+            all_matching=body.all_matching,
+        )
 
     @router.post("/api/images/download")
     async def download_images_endpoint(body: ImageDownloadRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        buf = download_images_zip(body.paths)
+        buf = await run_in_threadpool(download_images_zip, body.paths)
         return StreamingResponse(
             buf,
             media_type="application/zip",
@@ -128,17 +136,21 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/images/download/{image_path:path}")
     async def download_single_image_endpoint(image_path: str, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return get_image_download_response(image_path)
+        return await run_in_threadpool(get_image_download_response, image_path)
 
     @router.get("/api/logs")
     async def get_logs(type: str = "", start_date: str = "", end_date: str = "", authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return {"items": log_service.list(type=type.strip(), start_date=start_date.strip(), end_date=end_date.strip())}
+        items = await run_in_threadpool(
+            log_service.list, type=type.strip(),
+            start_date=start_date.strip(), end_date=end_date.strip(),
+        )
+        return {"items": items}
 
     @router.post("/api/logs/delete")
     async def delete_logs(body: LogDeleteRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return log_service.delete(body.ids)
+        return await run_in_threadpool(log_service.delete, body.ids)
 
     @router.post("/api/proxy/test")
     async def test_proxy_endpoint(body: ProxyTestRequest, authorization: str | None = Header(default=None)):
@@ -280,7 +292,7 @@ def create_router(app_version: str) -> APIRouter:
     @router.get("/api/images/storage")
     async def get_image_storage(authorization: str | None = Header(default=None)):
         require_admin(authorization)
-        return storage_stats()
+        return await run_in_threadpool(storage_stats)
 
     @router.post("/api/images/storage/compress")
     async def compress_all_images(authorization: str | None = Header(default=None)):
