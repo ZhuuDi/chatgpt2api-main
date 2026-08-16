@@ -89,6 +89,8 @@ services:
     image: chatgpt2api:warp
     container_name: chatgpt2api-warp
     restart: unless-stopped
+    # 内存硬上限：超限由 Docker OOM 杀掉并通过 restart 策略自动拉起，防止拖垮整机
+    mem_limit: 6g
     depends_on:
       init-config:
         condition: service_completed_successfully

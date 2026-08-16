@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     image: chatgpt2api:local
     container_name: chatgpt2api-local
+    # 内存硬上限：超限由 Docker OOM 杀掉并通过 restart 策略自动拉起，防止拖垮整机
+    mem_limit: 6g
     ports:
       - "8000:80"
     volumes:

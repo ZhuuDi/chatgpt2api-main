@@ -3,6 +3,9 @@ services:
     image: ghcr.io/basketikun/chatgpt2api:latest
     container_name: chatgpt2api
     restart: unless-stopped
+    # 内存硬上限：超限由 Docker OOM 杀掉并通过 restart 策略自动拉起，
+    # 防止极端情况下进程内存无限增长拖垮整台服务器（长期稳定兜底）
+    mem_limit: 6g
     ports:
       - "3000:80"
     volumes:
