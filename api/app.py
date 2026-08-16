@@ -16,6 +16,7 @@ from services.backup_service import backup_service
 from services.account_service import account_service
 from services.config import config
 from services.generation_executor import generation_executor
+from services.image_storage_service import image_storage_service
 from services.image_service import start_image_cleanup_scheduler
 
 
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
             config.stop_cleanup_worker()
             backup_service.stop()
             generation_executor.shutdown()
+            image_storage_service.flush()
             account_service.flush()
 
     app = FastAPI(title="chatgpt2api", version=app_version, lifespan=lifespan)

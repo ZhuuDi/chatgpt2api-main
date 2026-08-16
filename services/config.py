@@ -707,11 +707,13 @@ class ConfigStore:
                 key=lambda p: p.stat().st_mtime,
             )
             removed = 0
+            removed_rels: list[str] = []
             if batch_size is None:
                 for path in files:
                     try:
                         path.unlink()
                         removed += 1
+                        removed_rels.append(path.relative_to(self.images_dir).as_posix())
                     except OSError:
                         # 并发清理可能已删除该文件，忽略即可
                         pass
@@ -726,6 +728,7 @@ class ConfigStore:
                         try:
                             path.unlink()
                             removed += 1
+                            removed_rels.append(path.relative_to(self.images_dir).as_posix())
                         except OSError:
                             pass
                     if batch_interval_secs > 0 and (batch_index + 1) * batch_size < len(files):
@@ -737,6 +740,13 @@ class ConfigStore:
                     if time.time() - path.stat().st_mtime > 86400:
                         path.rmdir()
                 except OSError:
+                    pass
+            # 同步移除内存索引中的残留条目，避免索引无限膨胀
+            if removed_rels:
+                try:
+                    from services.image_storage_service import image_storage_service
+                    image_storage_service.remove_index_entries(removed_rels)
+                except Exception:
                     pass
             return removed
 

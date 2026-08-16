@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from urllib.parse import quote, urlparse
 
 from curl_cffi import requests
@@ -168,6 +168,12 @@ class ImageStorageService:
     def __init__(self, index_file: Path = IMAGE_INDEX_FILE):
         self.index_file = index_file
         self._index_lock = IMAGE_INDEX_LOCK
+        # 索引内存化：首次访问从磁盘加载后缓存，读写只改内存；
+        # 落盘合并窗口 15s（与账号落盘一致），避免每张保存全量读写 6.6MB 索引
+        self._items: dict[str, dict[str, object]] | None = None
+        self._dirty = False
+        self._flush_scheduled = False
+        self._flush_interval = 15.0
 
     def settings(self) -> dict[str, object]:
         return config.get_image_storage_settings()
@@ -183,11 +189,61 @@ class ImageStorageService:
         return {str(key): value for key, value in items.items() if isinstance(value, dict)}
 
     def _load_clean_index(self) -> dict[str, dict[str, object]]:
-        items = self._load_index()
-        return {rel: item for rel, item in items.items() if _is_image_rel(rel)}
+        """返回内存索引（首次访问时从磁盘加载并缓存），后续读写只改内存。"""
+        if self._items is None:
+            items = self._load_index()
+            self._items = {rel: item for rel, item in items.items() if _is_image_rel(rel)}
+        return self._items
 
-    def _save_index(self, items: dict[str, dict[str, object]]) -> None:
-        _write_json_object(self.index_file, {"items": items})
+    def _mark_dirty(self) -> None:
+        """标记索引已变更并调度合并落盘（窗口内多次变更只写一次磁盘）。"""
+        self._dirty = True
+        self._schedule_flush()
+
+    def _schedule_flush(self) -> None:
+        if self._flush_scheduled:
+            return
+        self._flush_scheduled = True
+        Thread(target=self._flush_worker, name="image-index-flush", daemon=True).start()
+
+    def _flush_worker(self) -> None:
+        try:
+            time.sleep(self._flush_interval)
+            self._flush_index_now()
+        finally:
+            self._flush_scheduled = False
+            if self._dirty:
+                self._schedule_flush()
+
+    def _flush_index_now(self) -> None:
+        with self._index_lock:
+            if not self._dirty or self._items is None:
+                return
+            self._dirty = False
+            items = dict(self._items)
+        try:
+            _write_json_object(self.index_file, {"items": items})
+        except Exception:
+            # 写盘失败恢复脏标记，等待下次重试
+            with self._index_lock:
+                self._dirty = True
+
+    def flush(self) -> None:
+        """立即落盘（服务退出/测试时调用）。"""
+        self._flush_index_now()
+
+    def remove_index_entries(self, rels: list[str]) -> int:
+        """清理删除文件后同步移除内存索引条目（由 cleanup_old_images 调用）。"""
+        removed = 0
+        with self._index_lock:
+            items = self._load_clean_index()
+            for rel in rels:
+                if rel in items:
+                    items.pop(rel, None)
+                    removed += 1
+            if removed:
+                self._mark_dirty()
+        return removed
 
     def _public_url(self, rel: str, base_url: str | None = None) -> str:
         settings = self.settings()
@@ -247,7 +303,7 @@ class ImageStorageService:
         with self._index_lock:
             items = self._load_clean_index()
             items[rel] = item
-            self._save_index(items)
+            self._mark_dirty()
         return StoredImage(rel=rel, url=self._public_url(rel, base_url), storage=str(item["storage"]), size=len(image_data))
 
     def get_bytes(self, rel: str) -> bytes:
@@ -338,7 +394,7 @@ class ImageStorageService:
                     "url": self._public_url(rel, base_url),
                 })
             if changed:
-                self._save_index(indexed)
+                self._mark_dirty()
         items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
         return items
 
@@ -360,7 +416,7 @@ class ImageStorageService:
                         raise
             if safe_rel in items:
                 items.pop(safe_rel, None)
-                self._save_index(items)
+                self._mark_dirty()
         return removed
 
     def sync_all(self) -> dict[str, int]:
@@ -402,7 +458,7 @@ class ImageStorageService:
                     uploaded += 1
                 except Exception:
                     failed += 1
-            self._save_index(items)
+            self._mark_dirty()
         return {"uploaded": uploaded, "skipped": skipped, "failed": failed}
 
     def test_webdav(self) -> dict[str, object]:
