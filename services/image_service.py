@@ -453,8 +453,9 @@ def _auto_cleanup_worker(stop_event: threading.Event) -> None:
             min_free_mb = config.image_min_free_mb
             if free_mb < min_free_mb:
                 logger.info({"event": "image_auto_cleanup", "free_mb": free_mb, "min_free_mb": min_free_mb})
+                # 一次删到「阈值 + 缓冲」，避免删一点就停、马上又删的震荡
                 result = delete_to_target(
-                    min_free_mb,
+                    min_free_mb + config.image_cleanup_buffer_mb,
                     batch_size=config.image_cleanup_batch_size,
                     batch_interval_secs=config.image_cleanup_batch_interval_secs,
                     max_batches=config.image_cleanup_max_batches_per_run,

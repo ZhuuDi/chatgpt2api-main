@@ -204,6 +204,7 @@ export type SettingsConfig = {
   log_backup_count?: number | string;
   image_auto_cleanup_enabled?: boolean;
   image_min_free_mb?: number | string;
+  image_cleanup_buffer_mb?: number | string;
   image_cleanup_batch_size?: number | string;
   image_cleanup_batch_interval_secs?: number | string;
   image_cleanup_max_batches_per_run?: number | string;

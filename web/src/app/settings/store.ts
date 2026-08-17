@@ -192,6 +192,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     log_backup_count: Number(config.log_backup_count || 5),
     image_auto_cleanup_enabled: Boolean(config.image_auto_cleanup_enabled !== false),
     image_min_free_mb: Number(config.image_min_free_mb || 500),
+    image_cleanup_buffer_mb: Number(config.image_cleanup_buffer_mb || 5000),
     image_cleanup_batch_size: Number(config.image_cleanup_batch_size || 50),
     image_cleanup_batch_interval_secs: Number(config.image_cleanup_batch_interval_secs || 2.0),
     image_cleanup_max_batches_per_run: Number(config.image_cleanup_max_batches_per_run || 10),
@@ -332,6 +333,7 @@ type SettingsStore = {
   setLogBackupCount: (value: string) => void;
   setImageAutoCleanupEnabled: (value: boolean) => void;
   setImageMinFreeMb: (value: string) => void;
+  setImageCleanupBufferMb: (value: string) => void;
   setImageCleanupBatchSize: (value: string) => void;
   setImageCleanupBatchIntervalSecs: (value: string) => void;
   setImageCleanupMaxBatchesPerRun: (value: string) => void;
@@ -645,6 +647,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageMinFreeMb: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_min_free_mb: value } } : {});
+  },
+
+  setImageCleanupBufferMb: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_cleanup_buffer_mb: value } } : {});
   },
 
   setImageCleanupBatchSize: (value) => {

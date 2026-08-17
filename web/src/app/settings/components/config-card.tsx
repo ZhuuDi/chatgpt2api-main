@@ -44,6 +44,7 @@ export function ConfigCard() {
   const setLogBackupCount = useSettingsStore((state) => state.setLogBackupCount);
   const setImageAutoCleanupEnabled = useSettingsStore((state) => state.setImageAutoCleanupEnabled);
   const setImageMinFreeMb = useSettingsStore((state) => state.setImageMinFreeMb);
+  const setImageCleanupBufferMb = useSettingsStore((state) => state.setImageCleanupBufferMb);
   const setImageCleanupBatchSize = useSettingsStore((state) => state.setImageCleanupBatchSize);
   const setImageCleanupBatchIntervalSecs = useSettingsStore((state) => state.setImageCleanupBatchIntervalSecs);
   const setImageCleanupMaxBatchesPerRun = useSettingsStore((state) => state.setImageCleanupMaxBatchesPerRun);
@@ -393,6 +394,16 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">单位 MB。磁盘剩余空间低于该值触发自动清理。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">清理缓冲区</label>
+            <Input
+              value={String(config?.image_cleanup_buffer_mb ?? "")}
+              onChange={(event) => setImageCleanupBufferMb(event.target.value)}
+              placeholder="5000"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位 MB。触发删除时一次删到「阈值+缓冲」，避免删一点就停、马上又删的震荡（默认 5000）。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">每批删除数量</label>

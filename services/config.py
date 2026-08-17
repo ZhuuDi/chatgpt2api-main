@@ -427,6 +427,15 @@ class ConfigStore:
         except (TypeError, ValueError):
             return 500
 
+
+    @property
+    def image_cleanup_buffer_mb(self) -> int:
+        """磁盘清理缓冲（MB）：触发阈值 = image_min_free_mb，但一次删到
+        阈值 + 缓冲，避免「删一点就停、马上又删」的震荡。"""
+        try:
+            return max(0, int(self.data.get("image_cleanup_buffer_mb", 5000)))
+        except (TypeError, ValueError):
+            return 5000
     @property
     def image_cleanup_batch_size(self) -> int:
         """图片自动清理每批删除的文件数，分批避免一次性大量删除卡顿。"""
@@ -771,11 +780,12 @@ class ConfigStore:
             self._cleanup_thread.start()
 
     def _cleanup_trigger_loop(self) -> None:
+        low_disk = False
         while not self._cleanup_stop.is_set():
-            # 空闲时每 60 秒兜底一次，事件触发时立即唤醒
-            self._cleanup_event.wait(timeout=60.0)
+            # 空闲时每 60 秒兜底一次；磁盘空间低时缩短到 20 秒加速删除收敛
+            self._cleanup_event.wait(timeout=20.0 if low_disk else 60.0)
             self._cleanup_event.clear()
-            self._run_cleanup_batch()
+            low_disk = self._run_cleanup_batch()
             # 合并执行期间新到的触发，避免高频保存时反复全量扫描
             while self._cleanup_event.is_set():
                 self._cleanup_event.clear()
@@ -789,7 +799,8 @@ class ConfigStore:
         if thread is not None and thread.is_alive():
             thread.join(timeout=5.0)
 
-    def _run_cleanup_batch(self) -> None:
+    def _run_cleanup_batch(self) -> bool:
+        """执行一轮保留期清理与磁盘空间保护；返回磁盘是否仍低于阈值（用于 20s 加速下一轮）。"""
         # 保留期清理：生图高峰期可避让 + 与备份等重 I/O 维护任务互斥，避免 HDD 风暴叠加
         try:
             from services.maintenance import MAINTENANCE_LOCK, generation_busy
@@ -808,21 +819,25 @@ class ConfigStore:
                             pass
         except Exception:
             pass
-        # 磁盘空间保护：高峰期也必须检查（本函数由保存触发 + 60s 兜底调用），
+        # 磁盘空间保护：高峰期也必须检查（本函数由保存触发 + 兜底调用），
         # 否则磁盘写满会导致 nginx 无法缓冲上传 → 客户端瞬间 500
         try:
             import shutil
             free_mb = shutil.disk_usage(self.images_dir).free // (1024 * 1024)
             if free_mb < self.image_min_free_mb:
                 from services.image_service import delete_to_target
+                # 一次删到「阈值 + 缓冲」，留出缓冲避免删一点就停、马上又删的震荡
                 delete_to_target(
-                    self.image_min_free_mb,
+                    self.image_min_free_mb + self.image_cleanup_buffer_mb,
                     batch_size=self.image_cleanup_batch_size,
                     batch_interval_secs=self.image_cleanup_batch_interval_secs,
                     max_batches=self.image_cleanup_max_batches_per_run,
                 )
+                free_after = shutil.disk_usage(self.images_dir).free // (1024 * 1024)
+                return free_after < self.image_min_free_mb
         except Exception:
             pass
+        return False
 
     @property
     def base_url(self) -> str:
@@ -847,6 +862,7 @@ class ConfigStore:
         data["image_retention_hours"] = self.image_retention_hours
         data["image_auto_cleanup_enabled"] = self.image_auto_cleanup_enabled
         data["image_min_free_mb"] = self.image_min_free_mb
+        data["image_cleanup_buffer_mb"] = self.image_cleanup_buffer_mb
         data["image_cleanup_batch_size"] = self.image_cleanup_batch_size
         data["image_cleanup_batch_interval_secs"] = self.image_cleanup_batch_interval_secs
         data["image_cleanup_max_batches_per_run"] = self.image_cleanup_max_batches_per_run
