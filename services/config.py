@@ -790,26 +790,39 @@ class ConfigStore:
             thread.join(timeout=5.0)
 
     def _run_cleanup_batch(self) -> None:
-        # 生图高峰期避让 + 与备份/缩略图等重 I/O 维护任务互斥，避免 HDD I/O 风暴叠加
+        # 保留期清理：生图高峰期可避让 + 与备份等重 I/O 维护任务互斥，避免 HDD 风暴叠加
         try:
             from services.maintenance import MAINTENANCE_LOCK, generation_busy
-            if generation_busy() or not MAINTENANCE_LOCK.acquire(blocking=False):
-                return
-        except Exception:
-            return
-        try:
-            self.cleanup_old_images(
-                batch_size=self.image_cleanup_batch_size,
-                batch_interval_secs=self.image_cleanup_batch_interval_secs,
-                max_batches=self.image_cleanup_max_batches_per_run,
-            )
+            if not generation_busy():
+                if MAINTENANCE_LOCK.acquire(blocking=False):
+                    try:
+                        self.cleanup_old_images(
+                            batch_size=self.image_cleanup_batch_size,
+                            batch_interval_secs=self.image_cleanup_batch_interval_secs,
+                            max_batches=self.image_cleanup_max_batches_per_run,
+                        )
+                    finally:
+                        try:
+                            MAINTENANCE_LOCK.release()
+                        except Exception:
+                            pass
         except Exception:
             pass
-        finally:
-            try:
-                MAINTENANCE_LOCK.release()
-            except Exception:
-                pass
+        # 磁盘空间保护：高峰期也必须检查（本函数由保存触发 + 60s 兜底调用），
+        # 否则磁盘写满会导致 nginx 无法缓冲上传 → 客户端瞬间 500
+        try:
+            import shutil
+            free_mb = shutil.disk_usage(self.images_dir).free // (1024 * 1024)
+            if free_mb < self.image_min_free_mb:
+                from services.image_service import delete_to_target
+                delete_to_target(
+                    self.image_min_free_mb,
+                    batch_size=self.image_cleanup_batch_size,
+                    batch_interval_secs=self.image_cleanup_batch_interval_secs,
+                    max_batches=self.image_cleanup_max_batches_per_run,
+                )
+        except Exception:
+            pass
 
     @property
     def base_url(self) -> str:

@@ -429,20 +429,23 @@ def _auto_cleanup_worker(stop_event: threading.Event) -> None:
     while not stop_event.wait(1800):  # 每30分钟
         try:
             from services.maintenance import MAINTENANCE_LOCK, generation_busy
-            if generation_busy() or not MAINTENANCE_LOCK.acquire(blocking=False):
-                continue
-            try:
-                config.cleanup_old_images(
-                    batch_size=config.image_cleanup_batch_size,
-                    batch_interval_secs=config.image_cleanup_batch_interval_secs,
-                    max_batches=config.image_cleanup_max_batches_per_run,
-                )
-                _cleanup_image_thumbnails_unlocked()
-            finally:
-                try:
-                    MAINTENANCE_LOCK.release()
-                except Exception:
-                    pass
+            # 保留期清理：生图高峰期可避让（文件晚几分钟删可接受）
+            if not generation_busy():
+                if MAINTENANCE_LOCK.acquire(blocking=False):
+                    try:
+                        config.cleanup_old_images(
+                            batch_size=config.image_cleanup_batch_size,
+                            batch_interval_secs=config.image_cleanup_batch_interval_secs,
+                            max_batches=config.image_cleanup_max_batches_per_run,
+                        )
+                        _cleanup_image_thumbnails_unlocked()
+                    finally:
+                        try:
+                            MAINTENANCE_LOCK.release()
+                        except Exception:
+                            pass
+            # 磁盘空间保护：生图高峰期也必须执行，否则磁盘写满会导致
+            # nginx 无法缓冲上传 → 客户端瞬间 500（曾实际发生）
             if not config.image_auto_cleanup_enabled:
                 continue
             usage = shutil.disk_usage(config.images_dir)
