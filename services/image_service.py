@@ -339,6 +339,7 @@ def delete_to_target(
         key=lambda p: p.stat().st_mtime,
     )
     removed = 0
+    removed_rels: list[str] = []
     freed = 0
     batches = 0
     index = 0
@@ -362,6 +363,7 @@ def delete_to_target(
                         tp.unlink()
                 remove_tags(rel)
                 p.unlink()
+                removed_rels.append(rel)
             freed += size
             removed += 1
         batches += 1
@@ -373,6 +375,14 @@ def delete_to_target(
         _cleanup_empty_dirs(config.image_thumbnails_dir)
         if removed:
             invalidate_image_query_cache()
+        # 同步移除内存索引中的残留条目，避免网页图片管理页出现“幽灵图片”
+        # （文件已删但索引仍显示，导致预览 404 / 下载失败）
+        if removed_rels:
+            try:
+                from services.image_storage_service import image_storage_service
+                image_storage_service.remove_index_entries(removed_rels)
+            except Exception:
+                pass
 
     return {
         "removed": removed,
