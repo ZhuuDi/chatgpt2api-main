@@ -313,6 +313,7 @@ def create_router(app_version: str) -> APIRouter:
         """运行时指标：FD/线程/内存、任务状态与耗时分位、在途账号槽位、后端池。"""
         from services.account_service import account_service as acct_svc
         from services.backend_pool import backend_pool
+        from services.generation_executor import generation_executor
         from services.image_task_service import image_task_executor, image_task_service
 
         fd_count = None
@@ -340,6 +341,11 @@ def create_router(app_version: str) -> APIRouter:
             "executor": {
                 "active": image_task_executor.active_count(),
                 "max_workers": image_task_executor.max_workers,
+            },
+            "generation": {
+                "in_flight": generation_executor.in_flight(),
+                "max_workers": generation_executor.max_workers,
+                "queue_limit": generation_executor.queue_limit,
             },
             "image_tasks": image_task_service.status_counts(),
             "latency_ms": image_task_service.latency_percentiles(),
