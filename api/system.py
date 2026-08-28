@@ -358,6 +358,23 @@ def create_router(app_version: str) -> APIRouter:
             },
         }
 
+    @router.post("/api/admin/memory/trim")
+    async def trim_memory(authorization: str | None = Header(default=None)):
+        """手动触发 glibc malloc_trim，归还停放内存（供 auto_restart 脚本先试 trim 再重启）。"""
+        require_admin(authorization)
+        from services.config import config
+        ok = config.trim_heap()
+        rss_mb = None
+        try:
+            with open("/proc/self/statm", "r", encoding="utf-8") as f:
+                parts = f.read().split()
+            if len(parts) >= 2:
+                page_size_kb = os.sysconf("SC_PAGE_SIZE") / 1024
+                rss_mb = round(int(parts[1]) * page_size_kb / 1024, 1)
+        except Exception:
+            pass
+        return {"ok": ok, "rss_mb": rss_mb}
+
     @router.get("/health", response_model=None)
     async def health_dashboard(format: str = Query(default="html")):
         from services.account_service import account_service as acct_svc

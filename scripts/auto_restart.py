@@ -36,6 +36,38 @@ def log(msg: str) -> None:
     print("%s %s" % (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg), flush=True)
 
 
+def _read_rss() -> float:
+    """读取 /metrics 的 runtime.rss_mb。"""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(METRICS, timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return float((d.get("runtime") or {}).get("rss_mb", 0) or 0)
+    except Exception:
+        return 0.0
+
+
+def _call_trim() -> bool:
+    """调用应用内 /api/admin/memory/trim（管理员），返回是否成功。"""
+    try:
+        import urllib.request
+        key = ""
+        try:
+            key = json.load(open("/opt/chatgpt2api-new/config.json", encoding="utf-8")).get("auth-key", "") or ""
+        except Exception:
+            pass
+        req = urllib.request.Request(
+            "http://127.0.0.1:3000/api/admin/memory/trim",
+            method="POST",
+            headers={"Authorization": "Bearer " + key},
+        )
+        with urllib.request.urlopen(req, timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8"))
+            return bool(d.get("ok"))
+    except Exception:
+        return False
+
+
 def main() -> None:
     state: dict = {}
     if os.path.exists(STATE):
@@ -69,7 +101,18 @@ def main() -> None:
     json.dump(state, open(STATE, "w"))
     log("rss_mb=%.0f in_flight=%d idle_streak=%d" % (rss_mb, inflight, streak))
     if streak >= IDLE_CHECKS:
-        log("触发重启")
+        # 方案2：先调用应用内 malloc_trim，内存回落则无需重启
+        if _call_trim():
+            time.sleep(3)
+            rss2 = _read_rss()
+            if rss2 < HIGH_MEM_MB:
+                log("malloc_trim 生效 rss=%.0f，无需重启" % rss2)
+                state["idle_streak"] = 0
+                json.dump(state, open(STATE, "w"))
+                return
+            log("trim 后仍高 rss=%.0f，触发重启" % rss2)
+        else:
+            log("trim 调用失败，直接重启")
         subprocess.run(["docker", "restart", "chatgpt2api"])
         state["idle_streak"] = 0
         state["last_restart"] = time.time()

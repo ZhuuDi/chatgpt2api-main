@@ -360,6 +360,9 @@ class ConfigStore:
         self._cleanup_stop = threading.Event()
         self._cleanup_thread_lock = threading.Lock()
         self._cleanup_thread: threading.Thread | None = None
+        # 停放内存回收：空闲时定期 malloc_trim（默认 5 分钟）
+        self._last_trim_at = 0.0
+        self._trim_interval_secs = 300.0
         if _is_invalid_auth_key(self.auth_key):
             raise ValueError(
                 "❌ auth-key 未设置！\n"
@@ -790,6 +793,35 @@ class ConfigStore:
             while self._cleanup_event.is_set():
                 self._cleanup_event.clear()
                 self._run_cleanup_batch()
+            # 空闲时定期回收停放内存（方案1）
+            self._maybe_trim_heap()
+
+    def _maybe_trim_heap(self) -> None:
+        """空闲时定期调用 glibc malloc_trim，归还高并发后停放的空闲内存。
+
+        高峰/忙碌（生图在途 >= 阈值）时跳过，避免 arena 锁竞争造成停顿；
+        空闲时每 _trim_interval_secs 执行一次。
+        """
+        try:
+            from services.maintenance import generation_busy
+            if generation_busy():
+                return
+            now = time.time()
+            if now - self._last_trim_at < self._trim_interval_secs:
+                return
+            self._last_trim_at = now
+            self.trim_heap()
+        except Exception:
+            pass
+
+    def trim_heap(self) -> bool:
+        """调用 glibc malloc_trim(0) 归还停放内存（供定时任务与管理员接口调用）。"""
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+            return True
+        except Exception:
+            return False
 
     def stop_cleanup_worker(self) -> None:
         """停止后台清理线程（测试与进程退出时调用，避免遗留线程操作真实数据目录）。"""
