@@ -112,6 +112,12 @@ class Sub2APIImportRequest(BaseModel):
     account_ids: list[str] = Field(default_factory=list)
 
 
+class ImportJsonBody(BaseModel):
+    """导入账号 JSON 请求体（外部系统/注册机调用）。"""
+    accounts: list[dict] = Field(default_factory=list)
+    sync_quota: bool = True
+
+
 class OAuthLoginStartRequest(BaseModel):
     """起始 OAuth 桥。email_hint 可选，仅用于让 OpenAI 登录页预填邮箱。"""
     email_hint: str = ""
@@ -584,5 +590,96 @@ def create_router() -> APIRouter:
         if server is None:
             raise HTTPException(status_code=404, detail={"error": "server not found"})
         return {"import_job": server.get("import_job")}
+
+    # ── 外部监控接口 ──────────────────────────────────────────────
+
+    @router.get("/api/accounts/image-quota")
+    async def get_image_quota(authorization: str | None = Header(default=None)):
+        """返回所有账号的图片生成额度聚合统计（供外部监控系统/注册机调用）。"""
+        require_admin(authorization)
+        items, _ = account_service.list_accounts_filtered(limit=0)
+        if not items:
+            return {"total_quota": 0, "total_accounts": 0, "active_accounts": 0,
+                    "limited_accounts": 0, "quota_breakdown": {}, "accounts": []}
+
+        total_quota = 0
+        active = 0
+        limited = 0
+        abnormal = 0
+        disabled = 0
+        unprobed = 0
+        breakdown = {"0": 0, "1_5": 0, "6_10": 0, "11_plus": 0}
+        details = []
+
+        for acct in items:
+            status = str(acct.get("status") or "")
+            quota_val = max(0, int(acct.get("quota") or 0))
+            email = str(acct.get("email") or "")
+
+            if status == "正常":
+                active += 1
+                total_quota += quota_val
+                if quota_val == 0:
+                    breakdown["0"] += 1
+                elif quota_val <= 5:
+                    breakdown["1_5"] += 1
+                elif quota_val <= 10:
+                    breakdown["6_10"] += 1
+                else:
+                    breakdown["11_plus"] += 1
+                details.append({"email": email, "quota": quota_val, "status": status})
+            elif status == "限流":
+                limited += 1
+                details.append({"email": email, "quota": quota_val, "status": status})
+            elif status == "异常":
+                abnormal += 1
+            elif status == "禁用":
+                disabled += 1
+            elif status == "未探测":
+                unprobed += 1
+
+        return {
+            "total_quota": total_quota,
+            "total_accounts": len(items),
+            "active_accounts": active,
+            "limited_accounts": limited,
+            "abnormal_accounts": abnormal,
+            "disabled_accounts": disabled,
+            "unprobed_accounts": unprobed,
+            "quota_breakdown": breakdown,
+            "accounts": details,
+        }
+
+    @router.post("/api/accounts/import-json")
+    async def import_accounts_json(body: ImportJsonBody, authorization: str | None = Header(default=None)):
+        """批量导入账号 JSON（供外部系统/注册机调用导入新注册的账号）。"""
+        require_admin(authorization)
+        if not body.accounts:
+            raise HTTPException(status_code=400, detail={"error": "accounts list is empty"})
+        try:
+            result = account_service.add_account_items(body.accounts)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail={"error": str(exc)}) from exc
+
+        added = int(result.get("added") or 0)
+        skipped = int(result.get("skipped") or 0)
+        synced = 0
+
+        if body.sync_quota and added > 0:
+            tokens = [
+                str(acct.get("access_token") or acct.get("accessToken") or "")
+                for acct in body.accounts
+                if acct.get("access_token") or acct.get("accessToken")
+            ]
+            if tokens and len(tokens) <= 50:
+                refresh_result = account_service.refresh_accounts(tokens)
+                synced = int(refresh_result.get("refreshed", 0))
+
+        return {
+            "added": added,
+            "skipped": skipped,
+            "synced": synced,
+            "total": len(body.accounts),
+        }
 
     return router
