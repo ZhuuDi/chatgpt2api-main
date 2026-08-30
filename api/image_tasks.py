@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import re
+import time as _time
+
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
@@ -27,6 +30,15 @@ def _parse_task_ids(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _parse_image_ts(key: str, item) -> int | None:
+    """从图片索引条目解析生成时间（文件名里的 10 位 unix 时间戳）。"""
+    text = str(key or "")
+    if isinstance(item, dict):
+        text += "|" + str(item.get("name") or "") + "|" + str(item.get("path") or "")
+    m = re.search(r"(\d{10})", text)
+    return int(m.group(1)) if m else None
+
+
 async def filter_or_log(call: LoggedCall, text: str) -> None:
     try:
         await run_in_threadpool(check_request, text)
@@ -37,6 +49,29 @@ async def filter_or_log(call: LoggedCall, text: str) -> None:
 
 def create_router() -> APIRouter:
     router = APIRouter()
+
+    @router.get("/api/images/stats")
+    async def image_stats(minutes: int = Query(default=30, ge=1, le=1440)):
+        """对外公开：统计最近 N 分钟内生成的图片数（默认 30 分钟，minutes 可调）。
+
+        基于图片索引（image_index.json）中每条记录的文件名时间戳统计，
+        图片生成成功后写入索引，因此计数 = 该时间段内成功生成的图片数。
+        """
+        from services.image_storage_service import image_storage_service
+        items = image_storage_service._load_clean_index() or {}
+        cutoff = _time.time() - minutes * 60
+        count = 0
+        for key, item in items.items():
+            ts = _parse_image_ts(key, item)
+            if ts and ts >= cutoff:
+                count += 1
+        return {
+            "ok": True,
+            "minutes": minutes,
+            "count": count,
+            "since": _time.strftime("%Y-%m-%d %H:%M:%S", _time.localtime(cutoff)),
+            "now": _time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     @router.get("/api/image-tasks")
     async def list_image_tasks(
