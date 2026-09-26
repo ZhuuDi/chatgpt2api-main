@@ -86,7 +86,7 @@ class AccountCapabilityTests(unittest.TestCase):
                 ]
             )
 
-            service.fetch_remote_info = lambda access_token, event="fetch_remote_info": service.get_account(access_token)
+            service.fetch_remote_info = lambda access_token, *args, **kwargs: service.get_account(access_token)
 
             plus_token = service.get_available_access_token(plan_type="plus")
             pro_token = service.get_available_access_token(plan_type="pro")

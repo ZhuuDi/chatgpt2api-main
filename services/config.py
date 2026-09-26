@@ -594,6 +594,26 @@ class ConfigStore:
             return 3
 
     @property
+    def image_upload_min_remaining(self) -> int:
+        """带输入图请求选号时，账号 file_upload 剩余额度低于该值即跳过；0 = 关闭预筛。
+
+        上游 free 档每日上限实测 80 次（滚动 24h 窗口），该计数有滞后：
+        remaining 并非 429 的严格实时预测器，因此阈值需留安全余量而非等到 0。
+        """
+        try:
+            return max(0, int(self.data.get("image_upload_min_remaining", 20)))
+        except (TypeError, ValueError):
+            return 20
+
+    @property
+    def image_upload_throttle_hours(self) -> int:
+        """生图请求命中上游 429 文件上传限额后，账号标记不可传图的持续小时数。"""
+        try:
+            return max(1, int(self.data.get("image_upload_throttle_hours", 24)))
+        except (TypeError, ValueError):
+            return 24
+
+    @property
     def image_parallel_generation(self) -> bool:
         value = self.data.get("image_parallel_generation", True)
         if isinstance(value, str):
@@ -911,6 +931,8 @@ class ConfigStore:
         data["log_max_bytes"] = self.log_max_bytes
         data["log_backup_count"] = self.log_backup_count
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_upload_min_remaining"] = self.image_upload_min_remaining
+        data["image_upload_throttle_hours"] = self.image_upload_throttle_hours
         data["account_probe_rate_per_minute"] = self.account_probe_rate_per_minute
         data["account_probe_min_interval_secs"] = self.account_probe_min_interval_secs
         data["account_probe_tick_secs"] = self.account_probe_tick_secs

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import secrets
 import threading
 import time
@@ -22,11 +23,21 @@ from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
 
+def _no_image_quota_message(plan_type: str | None, source_type: str | None, needs_upload: bool = False) -> str:
+    """保持 "no available ... image quota" 子串不变（api/support.py 依赖它映射 HTTP 429）。"""
+    base = f"no available {plan_type or source_type or ''} image quota".replace("  ", " ").strip()
+    if needs_upload:
+        base += " (all candidate accounts exhausted file upload quota)"
+    return base
+
+
 class AccountService:
     """账号池服务，使用 token -> account 的 dict 保存账号。"""
 
     _NEW_ACCOUNT_INVALID_GRACE_SECONDS = 10 * 60
     _INVALID_CONFIRM_SECONDS = 30
+    # 上游 429 报文里的重试时长，如「请23小时 内重试。」「请1天 内重试。」
+    _UPLOAD_THROTTLE_DURATION_RE = re.compile(r"请\s*(\d+)\s*(天|小时)")
     _ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 24 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_SECONDS = 3 * 24 * 60 * 60
     _REFRESH_TOKEN_KEEPALIVE_ERROR_BACKOFF_SECONDS = 6 * 60 * 60
@@ -198,6 +209,35 @@ class AccountService:
             return True
         return int(account.get("quota") or 0) > 0
 
+    @staticmethod
+    def _upload_remaining(account: dict) -> int | None:
+        """从已持久化的 limits_progress 里取 file_upload 剩余额度；无数据返回 None（未知）。"""
+        if not isinstance(account, dict):
+            return None
+        for item in account.get("limits_progress") or []:
+            if isinstance(item, dict) and item.get("feature_name") == "file_upload":
+                try:
+                    return max(0, int(item.get("remaining") or 0))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    def _is_upload_available(self, account: dict) -> bool:
+        """带输入图请求的账号预筛：429 兜底标记未到期，且探测余量不低于阈值。
+
+        remaining 缺失（未探测/旧数据）视为未知 → 放行，由生图时的 429 兜底标记补上。
+        """
+        if not isinstance(account, dict):
+            return False
+        restore_at = self._parse_time(account.get("upload_restore_at"))
+        if restore_at is not None and datetime.now(timezone.utc) < restore_at:
+            return False
+        min_remaining = config.image_upload_min_remaining
+        if min_remaining <= 0:
+            return True
+        remaining = self._upload_remaining(account)
+        return remaining is None or remaining >= min_remaining
+
     @classmethod
     def _account_matches_plan_type(cls, account: dict, plan_type: str | None = None) -> bool:
         if not plan_type:
@@ -291,6 +331,7 @@ class AccountService:
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
         normalized["default_model_slug"] = normalized.get("default_model_slug") or None
         normalized["restore_at"] = normalized.get("restore_at") or None
+        normalized["upload_restore_at"] = normalized.get("upload_restore_at") or None
         normalized["success"] = int(normalized.get("success") or 0)
         normalized["fail"] = int(normalized.get("fail") or 0)
         normalized["invalid_count"] = int(normalized.get("invalid_count") or 0)
@@ -954,6 +995,7 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            needs_upload: bool = False,
     ) -> list[str]:
         excluded = set(excluded_tokens or set())
         return [
@@ -963,6 +1005,7 @@ class AccountService:
                and self._account_matches_plan_type(item, plan_type)
                and self._account_matches_any_plan_type(item, plan_types)
                and self._account_matches_source_type(item, source_type)
+               and (not needs_upload or self._is_upload_available(item))
                and (token := item.get("access_token") or "")
                and token not in excluded
         ]
@@ -973,11 +1016,13 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            needs_upload: bool = False,
     ) -> list[str]:
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
         return [
             token
-            for token in self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+            for token in self._list_ready_candidate_tokens(
+                excluded_tokens, plan_type, source_type, plan_types, needs_upload)
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
 
@@ -987,15 +1032,17 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            needs_upload: bool = False,
     ) -> str:
         with self._image_slot_condition:
             while True:
-                if not self._list_ready_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types):
+                if not self._list_ready_candidate_tokens(
+                        excluded_tokens, plan_type, source_type, plan_types, needs_upload):
                     raise RuntimeError(
-                        f"no available {plan_type or source_type or ''} image quota".replace("  ", " ").strip()
-                        if plan_type or source_type else "no available image quota"
+                        _no_image_quota_message(plan_type, source_type, needs_upload)
                     )
-                tokens = self._list_available_candidate_tokens(excluded_tokens, plan_type, source_type, plan_types)
+                tokens = self._list_available_candidate_tokens(
+                    excluded_tokens, plan_type, source_type, plan_types, needs_upload)
                 if tokens:
                     access_token = tokens[self._index % len(tokens)]
                     self._index += 1
@@ -1020,11 +1067,13 @@ class AccountService:
             plan_type: str | None = None,
             source_type: str | None = None,
             plan_types: set[str] | tuple[str, ...] | None = None,
+            needs_upload: bool = False,
     ) -> str:
         """从候选池中获取一个可用的图片生图 token。
 
         基于本地缓存做初筛，然后通过 fetch_remote_info 做远程验证（token 有效性、配额等）。
         限制最大尝试次数防止 token rotation 导致无限循环。
+        needs_upload=True 时（带输入图请求）叠加文件上传额度预筛，跳过传不了图的账号。
         """
         max_attempts = 20  # 防止无限循环
         attempted_tokens: set[str] = set()
@@ -1034,6 +1083,7 @@ class AccountService:
                 plan_type=plan_type,
                 source_type=source_type,
                 plan_types=plan_types,
+                needs_upload=needs_upload,
             )
             attempted_tokens.add(access_token)
             try:
@@ -1051,12 +1101,13 @@ class AccountService:
                     and self._account_matches_plan_type(account or {}, plan_type)
                     and self._account_matches_any_plan_type(account or {}, plan_types)
                     and self._account_matches_source_type(account or {}, source_type)
+                    and (not needs_upload or self._is_upload_available(account or {}))
             ):
                 return str((account or {}).get("access_token") or access_token)
             self.release_image_slot(access_token)
         raise RuntimeError(
-            f"no available {plan_type or source_type or ''} image quota (tried {len(attempted_tokens)} tokens)".replace("  ", " ").strip()
-            if plan_type or source_type else f"no available image quota (tried {len(attempted_tokens)} tokens)"
+            _no_image_quota_message(plan_type, source_type, needs_upload)
+            + f" (tried {len(attempted_tokens)} tokens)"
         )
 
     def get_text_access_token(
@@ -1533,6 +1584,45 @@ class AccountService:
             self._save_accounts()
             return dict(account)
         return None
+
+    def mark_upload_throttled(self, access_token: str, error: str = "") -> dict | None:
+        """生图请求命中上游 429 文件上传限额：标记 upload_restore_at，带图请求在窗口内跳过该账号。
+
+        恢复时长优先取上游报文（如「请23小时 内重试」），解析失败用配置默认。
+        只影响需要上传参考图的请求；纯文生图不受影响。标记靠时间自然过期。
+        """
+        if not access_token:
+            return None
+        default_hours = config.image_upload_throttle_hours
+        hours = default_hours
+        match = self._UPLOAD_THROTTLE_DURATION_RE.search(str(error or ""))
+        if match:
+            value, unit = int(match.group(1)), match.group(2)
+            hours = max(1, value * 24 if unit == "天" else value)
+        restore_at = (datetime.now(timezone.utc) + timedelta(hours=hours)).isoformat()
+        with self._lock:
+            access_token = self._resolve_access_token_locked(access_token)
+            current = self._accounts.get(access_token)
+            if current is None:
+                return None
+            next_item = dict(current)
+            next_item["upload_restore_at"] = restore_at
+            account = self._normalize_account(next_item)
+            if account is None:
+                return None
+            self._accounts[access_token] = account
+            self._save_accounts()
+        log_service.add(
+            LOG_TYPE_ACCOUNT,
+            "标记文件上传限额",
+            {
+                "token": anonymize_token(access_token),
+                "restore_at": restore_at,
+                "restore_hours": hours,
+                "error": str(error or "")[:200],
+            },
+        )
+        return dict(account)
 
     def _get_remote_info_cache(self, access_token: str) -> dict[str, Any] | None:
         """返回未过期的账号探测缓存；TTL<=0 或未命中返回 None。"""

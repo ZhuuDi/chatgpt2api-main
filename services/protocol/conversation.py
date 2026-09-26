@@ -105,6 +105,20 @@ def is_connection_timeout_error(message: str) -> bool:
     )
 
 
+def is_upload_quota_error(message: str) -> bool:
+    """检测上游 429 文件上传限额（/backend-api/files 的 throttled）。
+
+    该错误说明账号当日上传额度耗尽（约 24h 滚动窗口），同账号重试无意义，
+    应标记账号后换号。上传发生在任何 SSE 输出之前，换号重试是安全的。
+    """
+    text = str(message or "")
+    return (
+        "/backend-api/files" in text
+        and "status=429" in text
+        and "throttled" in text
+    )
+
+
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     if is_token_invalid_error(text):
@@ -1385,6 +1399,8 @@ def _generate_single_image(
                 plan_type=plan_type,
                 source_type="codex" if codex_model else None,
                 plan_types=("plus", "team", "pro") if codex_model and not plan_type else None,
+                # codex 链路图片走 base64 内联，不经过 /backend-api/files，无需上传额度
+                needs_upload=bool(request.images) and not codex_model,
             )
         except RuntimeError as exc:
             raise ImageGenerationError(str(exc) or "image generation failed", account_email=account_email) from exc
@@ -1590,6 +1606,18 @@ def _generate_single_image(
                     time.sleep(wait_secs)
                     total_retry_count += 1
                     continue
+            # 上游 429 文件上传限额：标记账号后换号重试（上传在任何输出之前，重试安全）
+            if not emitted_for_token and is_upload_quota_error(last_error):
+                account_service.mark_upload_throttled(token, last_error)
+                logger.warning({
+                    "event": "image_stream_upload_quota_retry",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "index": index,
+                    "error": last_error[:200],
+                })
+                total_retry_count += 1
+                continue
             raise ImageGenerationError(image_stream_error_message(last_error), account_email=account_email, conversation_id="") from exc
         finally:
             if backend is not None:
