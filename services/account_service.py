@@ -1624,6 +1624,36 @@ class AccountService:
         )
         return dict(account)
 
+    def summarize_uploadable_image_quota(self) -> dict[str, int]:
+        """带参考图请求可用的生图额度聚合（供公开监控接口使用，不含账号明细）。
+
+        过滤口径与选号 needs_upload=True 完全同源：
+        _is_image_account_available + _is_upload_available，保证数字与实际路由行为一致。
+        excluded_* 为「生图可用但上传不可用」被排除的账号数与额度。
+        """
+        with self._lock:
+            accounts = [dict(item) for item in self._accounts.values()]
+        total_quota = 0
+        uploadable = 0
+        excluded = 0
+        excluded_quota = 0
+        for acct in accounts:
+            quota_val = max(0, int(acct.get("quota") or 0))
+            if not self._is_image_account_available(acct):
+                continue
+            if self._is_upload_available(acct):
+                uploadable += 1
+                total_quota += quota_val
+            else:
+                excluded += 1
+                excluded_quota += quota_val
+        return {
+            "total_quota": total_quota,
+            "uploadable_accounts": uploadable,
+            "excluded_accounts": excluded,
+            "excluded_quota": excluded_quota,
+        }
+
     def _get_remote_info_cache(self, access_token: str) -> dict[str, Any] | None:
         """返回未过期的账号探测缓存；TTL<=0 或未命中返回 None。"""
         ttl = config.account_remote_info_cache_ttl_secs

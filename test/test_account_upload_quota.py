@@ -254,5 +254,56 @@ class NeedsUploadSelectionTests(unittest.TestCase):
         self.assertIn("no available image quota", _no_image_quota_message(None, None, True))
 
 
+class UploadableQuotaSummaryTests(unittest.TestCase):
+    def test_summary_excludes_upload_unavailable_accounts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+            service.add_account_items(
+                [
+                    # 上传可用：计入 total_quota
+                    {"access_token": "t-ok", "status": "正常", "quota": 7, "limits_progress": _limits_progress(78)},
+                    # 余量低于阈值：生图可用但上传不可用 → excluded
+                    {"access_token": "t-low", "status": "正常", "quota": 2, "limits_progress": _limits_progress(3)},
+                    # 无探测数据（余量未知放行），但有 429 标记 → excluded
+                    {"access_token": "t-marked", "status": "正常", "quota": 4},
+                    # 限流账号：生图本就不可用，不计入 excluded
+                    {"access_token": "t-limited", "status": "限流", "quota": 0},
+                ]
+            )
+            service.mark_upload_throttled("t-marked", REAL_UPLOAD_429_ERROR)
+
+            summary = service.summarize_uploadable_image_quota()
+
+            self.assertEqual(summary["total_quota"], 7)
+            self.assertEqual(summary["uploadable_accounts"], 1)
+            self.assertEqual(summary["excluded_accounts"], 2)
+            self.assertEqual(summary["excluded_quota"], 6)
+
+    def test_summary_zero_threshold_counts_all_image_available_accounts(self) -> None:
+        original = config.data.get("image_upload_min_remaining")
+        config.data["image_upload_min_remaining"] = 0
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                service = AccountService(JSONStorageBackend(Path(tmp_dir) / "accounts.json"))
+                service.add_account_items(
+                    [
+                        {"access_token": "t-ok", "status": "正常", "quota": 7, "limits_progress": _limits_progress(78)},
+                        {"access_token": "t-zero", "status": "正常", "quota": 3, "limits_progress": _limits_progress(0)},
+                    ]
+                )
+
+                summary = service.summarize_uploadable_image_quota()
+
+                self.assertEqual(summary["total_quota"], 10)
+                self.assertEqual(summary["uploadable_accounts"], 2)
+                self.assertEqual(summary["excluded_accounts"], 0)
+                self.assertEqual(summary["excluded_quota"], 0)
+        finally:
+            if original is None:
+                config.data.pop("image_upload_min_remaining", None)
+            else:
+                config.data["image_upload_min_remaining"] = original
+
+
 if __name__ == "__main__":
     unittest.main()

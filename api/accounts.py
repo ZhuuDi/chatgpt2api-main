@@ -24,6 +24,7 @@ from api.support import (
     sanitize_sub2api_servers,
 )
 from services.account_service import account_service
+from services.config import config
 from services.cpa_service import cpa_config, cpa_import_service, list_remote_files
 from services.oauth_login_service import OAuthLoginError, oauth_login_service
 from services.sub2api_service import (
@@ -648,6 +649,21 @@ def create_router() -> APIRouter:
             "unprobed_accounts": unprobed,
             "quota_breakdown": breakdown,
             "accounts": details,
+        }
+
+    @router.get("/api/accounts/uploadable-image-quota")
+    async def get_uploadable_image_quota():
+        """公开接口：带参考图请求可用的生图额度聚合（不含账号明细）。
+
+        过滤口径与生图选号 needs_upload=True 同源：生图可用（状态/额度）且上传可用
+        （无 429 标记、file_upload 余量达阈值）的账号才计入 total_quota；
+        生图可用但上传不可用的账号单独计入 excluded_*，便于监控观测排除损失。
+        """
+        summary = account_service.summarize_uploadable_image_quota()
+        return {
+            "ok": True,
+            **summary,
+            "min_upload_remaining": config.image_upload_min_remaining,
         }
 
     @router.post("/api/accounts/import-json")
