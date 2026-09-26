@@ -184,6 +184,9 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_generation_max_workers: Number(config.image_generation_max_workers || 150),
     image_generation_queue_size: Number(config.image_generation_queue_size || 300),
     image_retry_budget: Number(config.image_retry_budget || 5),
+    // min_remaining 允许 0（关闭预筛），用 ?? 而非 ||
+    image_upload_min_remaining: Number(config.image_upload_min_remaining ?? 20),
+    image_upload_throttle_hours: Number(config.image_upload_throttle_hours ?? 24),
     account_probe_rate_per_minute: Number(config.account_probe_rate_per_minute || 120),
     account_probe_min_interval_secs: Number(config.account_probe_min_interval_secs || 300),
     account_probe_tick_secs: Number(config.account_probe_tick_secs || 5),
@@ -325,6 +328,8 @@ type SettingsStore = {
   setImageGenerationMaxWorkers: (value: string) => void;
   setImageGenerationQueueSize: (value: string) => void;
   setImageRetryBudget: (value: string) => void;
+  setImageUploadMinRemaining: (value: string) => void;
+  setImageUploadThrottleHours: (value: string) => void;
   setAccountProbeRatePerMinute: (value: string) => void;
   setAccountProbeMinIntervalSecs: (value: string) => void;
   setAccountProbeTickSecs: (value: string) => void;
@@ -467,6 +472,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_remove_conversation_always: Boolean(config.image_remove_conversation_always),
         image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2.0),
         image_timeout_retry_secs: Math.max(1, Number(config.image_timeout_retry_secs) || 30),
+        // min_remaining 允许 0（关闭预筛），不能被 || 兜底成默认值
+        image_upload_min_remaining: Math.max(0, Number(config.image_upload_min_remaining ?? 20) || 0),
+        image_upload_throttle_hours: Math.max(1, Number(config.image_upload_throttle_hours) || 24),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
         auto_relogin_after_refresh: Boolean(config.auto_relogin_after_refresh),
@@ -616,6 +624,14 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageRetryBudget: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_retry_budget: value } } : {});
+  },
+
+  setImageUploadMinRemaining: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_upload_min_remaining: value } } : {});
+  },
+
+  setImageUploadThrottleHours: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_upload_throttle_hours: value } } : {});
   },
 
   setAccountProbeRatePerMinute: (value) => {

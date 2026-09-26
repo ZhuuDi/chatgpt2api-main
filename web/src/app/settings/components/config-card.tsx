@@ -36,6 +36,8 @@ export function ConfigCard() {
   const setImageGenerationMaxWorkers = useSettingsStore((state) => state.setImageGenerationMaxWorkers);
   const setImageGenerationQueueSize = useSettingsStore((state) => state.setImageGenerationQueueSize);
   const setImageRetryBudget = useSettingsStore((state) => state.setImageRetryBudget);
+  const setImageUploadMinRemaining = useSettingsStore((state) => state.setImageUploadMinRemaining);
+  const setImageUploadThrottleHours = useSettingsStore((state) => state.setImageUploadThrottleHours);
   const setAccountProbeRatePerMinute = useSettingsStore((state) => state.setAccountProbeRatePerMinute);
   const setAccountProbeMinIntervalSecs = useSettingsStore((state) => state.setAccountProbeMinIntervalSecs);
   const setAccountProbeTickSecs = useSettingsStore((state) => state.setAccountProbeTickSecs);
@@ -374,6 +376,26 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">单路图片生成所有类型重试（超时/网络/换号等）的合计次数上限，防止重试放大并发。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">上传额度预筛阈值</label>
+            <Input
+              value={String(config?.image_upload_min_remaining ?? "")}
+              onChange={(event) => setImageUploadMinRemaining(event.target.value)}
+              placeholder="20"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">带参考图的生图请求跳过文件上传剩余额度低于该值的账号（默认 20，0 = 关闭预筛）。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">上传限额标记时长（小时）</label>
+            <Input
+              value={String(config?.image_upload_throttle_hours ?? "")}
+              onChange={(event) => setImageUploadThrottleHours(event.target.value)}
+              placeholder="24"
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">命中上游 429 文件上传限额后，该账号被带图请求跳过的持续小时数（默认 24）。</p>
           </div>
           <div className="space-y-2 md:col-span-2">
             <div className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3">

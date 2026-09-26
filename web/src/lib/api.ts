@@ -196,6 +196,8 @@ export type SettingsConfig = {
   image_generation_max_workers?: number | string;
   image_generation_queue_size?: number | string;
   image_retry_budget?: number | string;
+  image_upload_min_remaining?: number | string;
+  image_upload_throttle_hours?: number | string;
   account_probe_rate_per_minute?: number | string;
   account_probe_min_interval_secs?: number | string;
   account_probe_tick_secs?: number | string;
