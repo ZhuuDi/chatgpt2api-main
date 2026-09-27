@@ -637,6 +637,19 @@ class ConfigStore:
         return bool(value)
 
     @property
+    def image_refusal_early_exit_enabled(self) -> bool:
+        """轮询中「回合已终结且无图片任务」的兜底早退开关。
+
+        默认关闭：先以 dry-run 日志（image_poll_conversation_turn_ended_dry_run）观察
+        误伤率，确认不会把正常异步慢出图误判为拒绝后再开启。
+        明确命中「误判为编辑已有图片」特征（is_image_edit_refusal）时不走该开关，直接早退。
+        """
+        value = self.data.get("image_refusal_early_exit_enabled", False)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @property
     def image_remove_conversation_after_result(self) -> bool:
         """出图成功后异步隐藏 ChatGPT 本地对话记录。"""
         value = self.data.get("image_remove_conversation_after_result", False)

@@ -15,7 +15,13 @@ from services.account_service import account_service
 from services.config import config
 from services.backend_pool import backend_pool
 from services.image_storage_service import image_storage_service
-from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
+from services.openai_backend_api import (
+    ImageContentPolicyError,
+    ImagePollTimeoutError,
+    ImageRefusalError,
+    OpenAIBackendAPI,
+    is_image_edit_refusal,
+)
 from utils.helper import (
     IMAGE_MODELS,
     extract_image_from_message_content,
@@ -135,6 +141,14 @@ REFERENCED_IMAGE_IDS_RE = re.compile(r'"referenced_image_ids"\s*:\s*\[([^\]]+)\]
 # 这些 JSON 包含图片生成工具的参数，但没有实际生成图片
 TOOL_PARAMS_JSON_RE = re.compile(
     r'\{\s*"size"\s*:\s*"\d+x\d+"\s*,\s*"n"\s*:\s*\d+\s*\}'
+)
+
+# 上游把文生图误判为「编辑已有图片」拒绝后，重试轮追加的澄清词：
+# 直指误判来源（模型/工具把「角色 + 具体描述」读成指向某个已有图片），
+# 只加在重试轮，避免影响正常首轮请求。
+IMAGE_EDIT_REFUSAL_CLARIFICATION = (
+    "这是一次全新的图片生成请求：请直接生成一张全新的图片，"
+    "不要当作编辑或还原已有图片处理，本次请求不需要任何参考图。"
 )
 
 
@@ -323,6 +337,7 @@ class ConversationRequest:
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
     deadline: float | None = None  # time.monotonic() 单请求总预算截止时间（SSE+轮询+下载共享）
+    retry_prompt_suffix: str = ""  # 误判拒绝重试轮追加的澄清词（不影响首轮请求）
 
 
 @dataclass
@@ -706,12 +721,18 @@ def conversation_events(
     quality: str = "auto",
     thinking_effort: str = "",
     deadline: float | None = None,
+    prompt_suffix: str = "",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
-    final_prompt = prompt_with_global_system(build_image_prompt(prompt, size, quality)) if image_model else prompt
+    if image_model:
+        final_prompt = prompt_with_global_system(build_image_prompt(prompt, size, quality))
+        if prompt_suffix:
+            final_prompt = f"{final_prompt}\n\n{prompt_suffix}"
+    else:
+        final_prompt = prompt
     payloads = backend.stream_conversation(
         messages=normalized,
         model=model,
@@ -888,6 +909,7 @@ def stream_image_outputs(
             size=request.size,
             quality=request.quality,
             deadline=request.deadline,
+            prompt_suffix=request.retry_prompt_suffix or "",
     ):
         last = event
         if event.get("type") == "conversation.delta":
@@ -933,6 +955,18 @@ def stream_image_outputs(
         error_text = detailed_error or message or "Image generation was rejected by upstream policy."
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=error_text, conversation_id=conversation_id)
         return
+    # SSE 文本本身就是「误判为编辑/还原已有图片」的拒绝时直接上抛：
+    # 该回合已终结、永远不会有图片产出，无需再进入轮询等待（否则要等到超时）。
+    # 该拒绝是概率性的，上抛后由 _generate_single_image 换账号 + 新对话重试。
+    if (message and not file_ids and not sediment_ids
+            and not is_model_text_reply_instead_of_image(message)
+            and is_image_edit_refusal(message)):
+        logger.warning({
+            "event": "image_edit_refusal_detected_in_stream",
+            "conversation_id": conversation_id,
+            "message_preview": message[:200],
+        })
+        raise ImageRefusalError(message[:500], conversation_id or "")
     should_poll_for_image = bool(request.images) or last.get("turn_use_case") == "image gen"
     if message and not file_ids and not sediment_ids and not should_poll_for_image:
         yield ImageOutput(kind="message", model=request.model, index=index, total=total, text=message, conversation_id=conversation_id)
@@ -1012,9 +1046,10 @@ def stream_image_outputs(
         image_urls = backend.resolve_conversation_image_urls(
             conversation_id, file_ids, sediment_ids, poll_timeout_secs=poll_timeout,
         )
-    except (ImageContentPolicyError, ImagePollTimeoutError) as exc:
+    except (ImageContentPolicyError, ImagePollTimeoutError, ImageRefusalError) as exc:
         # 当检测到文本回复时，task error 不应直接判定为内容策略违规，
-        # 因为图片可能仍在后台异步生成中
+        # 因为图片可能仍在后台异步生成中。
+        # ImageRefusalError 例外：上游已明确拒绝且回合终结，必须立即上抛重试。
         if is_text_reply and isinstance(exc, ImageContentPolicyError):
             logger.warning({
                 "event": "image_text_reply_task_error_ignored",
@@ -1118,8 +1153,11 @@ def stream_image_outputs(
                         "error": repr(exc)[:300],
                         "is_transient": is_transient,
                     })
-                    # 如果还有重试次数且不是超时/内容违规错误，继续重试
-                    if poll_attempt < MAX_POLL_RETRIES and not isinstance(exc, (ImagePollTimeoutError, ImageContentPolicyError)):
+                    # 误判拒绝：回合已终结，必须立即上抛交给上层换账号重试
+                    if isinstance(exc, ImageRefusalError):
+                        raise
+                    # 如果还有重试次数且不是超时/内容违规/误判拒绝错误，继续重试
+                    if poll_attempt < MAX_POLL_RETRIES and not isinstance(exc, (ImagePollTimeoutError, ImageContentPolicyError, ImageRefusalError)):
                         # 递增退避：30s, 60s, 90s（受剩余预算约束）
                         backoff = min(30.0 * poll_attempt, _remaining_budget(request))
                         if backoff <= 0:
@@ -1236,8 +1274,11 @@ def stream_image_outputs(
                     "error": repr(exc)[:300],
                     "is_transient": is_transient,
                 })
-                # 如果还有重试次数且不是超时/内容违规错误，继续重试
-                if poll_attempt < MAX_FALLBACK_POLL_RETRIES and not isinstance(exc, (ImagePollTimeoutError, ImageContentPolicyError)):
+                # 误判拒绝：回合已终结，必须立即上抛交给上层换账号重试
+                if isinstance(exc, ImageRefusalError):
+                    raise
+                # 如果还有重试次数且不是超时/内容违规/误判拒绝错误，继续重试
+                if poll_attempt < MAX_FALLBACK_POLL_RETRIES and not isinstance(exc, (ImagePollTimeoutError, ImageContentPolicyError, ImageRefusalError)):
                     # 递增退避：30s, 60s（受剩余预算约束）
                     backoff = min(30.0 * poll_attempt, _remaining_budget(request))
                     if backoff <= 0:
@@ -1355,11 +1396,14 @@ def _generate_single_image(
     MAX_CONN_TIMEOUT_RETRIES = 3
     # 轮询超时错误最大重试次数（换账号重试）
     MAX_POLL_TIMEOUT_RETRIES = 4
+    # 误判拒绝（文生图被当成编辑已有图片）最大重试次数（换账号 + 新对话）
+    MAX_REFUSAL_RETRIES = 3
 
     text_reply_retry_count = 0
     tls_retry_count = 0
     conn_timeout_retry_count = 0
     poll_timeout_retry_count = 0
+    refusal_retry_count = 0
     account_email = ""
 
     # 单请求总预算：SSE 流 + 轮询 + 下载 + 重试共享同一 deadline（默认 180s），
@@ -1508,6 +1552,43 @@ def _generate_single_image(
                 status_code=400,
                 error_type="invalid_request_error",
                 code="content_policy_violation",
+                account_email=account_email,
+                conversation_id=getattr(exc, "conversation_id", ""),
+            ) from exc
+        except ImageRefusalError as exc:
+            # 上游把文生图误判为「编辑已有图片」并拒绝：回合已终结、永远不会有图片。
+            # 该拒绝是概率性的（换账号/新对话通常可成功），因此换账号重试；
+            # 重试轮追加澄清词，直指误判来源，降低再次命中概率。
+            account_service.mark_image_result(token, False)
+            if account_email:
+                setattr(exc, "account_email", account_email)
+            refusal_retry_count += 1
+            if not returned_result and refusal_retry_count <= MAX_REFUSAL_RETRIES and total_retry_count < retry_budget:
+                req = replace(req, retry_prompt_suffix=IMAGE_EDIT_REFUSAL_CLARIFICATION)
+                logger.warning({
+                    "event": "image_edit_refusal_retry",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "retry_count": refusal_retry_count,
+                    "index": index,
+                    "error": str(exc)[:200],
+                })
+                total_retry_count += 1
+                continue
+            logger.warning({
+                "event": "image_edit_refusal_exhausted_retries",
+                "request_token": token,
+                "account_email": account_email,
+                "retry_count": refusal_retry_count,
+                "index": index,
+            })
+            raise ImageGenerationError(
+                "Image generation failed: the upstream refused the request, mistaking it for an "
+                f"edit/restore of an existing image with no usable image target (auto-retried {refusal_retry_count} times). "
+                "Please try again later.",
+                status_code=502,
+                error_type="server_error",
+                code="upstream_edit_refusal",
                 account_email=account_email,
                 conversation_id=getattr(exc, "conversation_id", ""),
             ) from exc

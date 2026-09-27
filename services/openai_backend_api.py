@@ -50,6 +50,16 @@ class ImageContentPolicyError(ImageTaskError):
     pass
 
 
+class ImageRefusalError(ImageTaskError):
+    """上游把文生图误判为「编辑/还原已有图片」并文本拒绝（无可用图片目标）。
+
+    与 ImageContentPolicyError 不同：该拒绝是上游工具的概率性误判（同一请求换账号/
+    新对话通常可成功），且回合已终结、永远不会有图片产出，因此调用方应立即换账号
+    重试，而不是继续轮询等待。
+    """
+    pass
+
+
 class ImageStreamHardTimeoutError(RuntimeError):
     """图片 SSE 流读取超过硬上限时抛出，用于快速中断被挂起的长连接。"""
     pass
@@ -129,6 +139,38 @@ def _is_content_policy_error(error_msg: str) -> bool:
         return False
     msg_lower = error_msg.lower()
     return any(keyword in msg_lower for keyword in _CONTENT_POLICY_KEYWORDS)
+
+
+# 上游把文生图误判为「编辑/还原已有图片」的拒绝特征。
+# 英文句来自 image_gen 工具自身的固定模板（最稳定，优先匹配）；
+# 中文句来自模型改写（补充匹配），仅在上传/参考图语义同时出现时命中。
+_IMAGE_EDIT_REFUSAL_KEYWORDS = (
+    "no usable image target",
+    "edit or restore",
+    "do not retry image generation",
+    "upload or identify the image",
+)
+
+
+def is_image_edit_refusal(text: str) -> bool:
+    """判断文本是否为「误判为编辑已有图片」的上游拒绝。
+
+    这类拒绝代表该回合已终结、永远不会有图片产出：调用方应立即换账号 + 新对话
+    重试，而不是继续轮询等待（否则要等到轮询超时）。
+    """
+    if not text:
+        return False
+    lowered = text.lower()
+    if any(keyword in lowered for keyword in _IMAGE_EDIT_REFUSAL_KEYWORDS):
+        return True
+    if "参考" in text and any(item in text for item in ("请上传", "需要上传", "上传或指定")):
+        return True
+    if (
+        any(item in text for item in ("编辑已有图片", "编辑现有图片", "编辑或还原"))
+        and any(item in text for item in ("无法", "抱歉", "误"))
+    ):
+        return True
+    return False
 
 
 @dataclass
@@ -2092,13 +2134,8 @@ class OpenAIBackendAPI:
         return sorted(records, key=lambda item: item["create_time"])
 
     @staticmethod
-    def _find_content_policy_error_in_conversation(data: Dict[str, Any]) -> str:
-        """从对话文档中查找内容政策违规错误消息。
-
-        上游拒绝生成图片时，错误消息会出现在 assistant 消息的文本中。
-        本方法遍历所有 assistant/tool 消息，检查是否包含内容政策违规关键词，
-        如果匹配则返回该消息文本（截断至 500 字符），否则返回空字符串。
-        """
+    def _iter_conversation_message_texts(data: Dict[str, Any]) -> Iterator[tuple[str, str]]:
+        """遍历对话文档中的 assistant/tool 消息，产出 (role, 文本)。"""
         mapping = data.get("mapping") or {}
         for node in mapping.values():
             message = (node or {}).get("message") or {}
@@ -2121,9 +2158,65 @@ class OpenAIBackendAPI:
             elif isinstance(content, str) and content.strip():
                 text_parts.append(content.strip())
             msg_text = "\n".join(text_parts)
-            if msg_text and _is_content_policy_error(msg_text):
+            if msg_text:
+                yield role, msg_text
+
+    @classmethod
+    def _find_content_policy_error_in_conversation(cls, data: Dict[str, Any]) -> str:
+        """从对话文档中查找内容政策违规错误消息。
+
+        上游拒绝生成图片时，错误消息会出现在 assistant/tool 消息的文本中。
+        如果匹配则返回该消息文本（截断至 500 字符），否则返回空字符串。
+        """
+        for _role, msg_text in cls._iter_conversation_message_texts(data):
+            if _is_content_policy_error(msg_text):
                 return msg_text[:500]
         return ""
+
+    @classmethod
+    def _find_image_refusal_in_conversation(cls, data: Dict[str, Any]) -> str:
+        """从对话文档中查找「误判为编辑已有图片」的拒绝文本。
+
+        命中说明该回合已终结且不会有图片产出，应立即换账号重试而非继续轮询。
+        """
+        for _role, msg_text in cls._iter_conversation_message_texts(data):
+            if is_image_edit_refusal(msg_text):
+                return msg_text[:500]
+        return ""
+
+    @classmethod
+    def _conversation_turn_ended_without_image(cls, data: Dict[str, Any]) -> str:
+        """检测「回合已终结且全程无图片产出」的兜底信号（未知拒绝变体用）。
+
+        判定条件：存在已完成的 assistant 文本（metadata.is_complete=true），
+        且整个对话文档没有任何 async_task_type=image_gen 的图片任务节点。
+        返回最后一条已完成文本；不满足条件返回空字符串（视为图片可能仍在异步生成）。
+        """
+        mapping = data.get("mapping") or {}
+        completed_text = ""
+        completed_time = -1.0
+        for node in mapping.values():
+            message = (node or {}).get("message") or {}
+            metadata = message.get("metadata") or {}
+            if metadata.get("async_task_type") == "image_gen":
+                return ""
+            author = (message.get("author") or {}).get("role") or ""
+            if author != "assistant":
+                continue
+            content = message.get("content") or {}
+            if not isinstance(content, dict) or content.get("content_type") != "text":
+                continue
+            if not metadata.get("is_complete"):
+                continue
+            try:
+                created = float(message.get("create_time") or 0.0)
+            except (TypeError, ValueError):
+                created = 0.0
+            if created >= completed_time:
+                completed_time = created
+                parts = content.get("parts") or []
+                completed_text = "\n".join(str(part) for part in parts if isinstance(part, str))
+        return completed_text if completed_text.strip() else ""
 
     def _poll_image_results(
             self,
@@ -2250,11 +2343,20 @@ class OpenAIBackendAPI:
                     if sediment_id not in sediment_ids:
                         sediment_ids.append(sediment_id)
 
-            # 检查对话文本中是否包含内容政策违规错误
+            # 检查对话文本中是否包含内容政策违规 / 误判拒绝错误
             # 当上游拒绝生成图片时，错误消息会出现在对话文档的 assistant 消息中，
             # 而非 /backend-api/tasks/ 的 task error 结构中。
-            # 如果在没有找到图片文件 ID 的同时检测到内容政策违规，立即中断轮询。
+            # 如果在没有找到图片文件 ID 的同时检测到拒绝，立即中断轮询。
             if not file_ids and not sediment_ids:
+                refusal_msg = self._find_image_refusal_in_conversation(conversation)
+                if refusal_msg:
+                    logger.warning({
+                        "event": "image_poll_conversation_edit_refusal",
+                        "conversation_id": conversation_id,
+                        "attempt": attempt,
+                        "error_msg": refusal_msg[:200],
+                    })
+                    raise ImageRefusalError(refusal_msg, conversation_id or "")
                 policy_msg = self._find_content_policy_error_in_conversation(conversation)
                 if policy_msg:
                     logger.warning({
@@ -2264,6 +2366,24 @@ class OpenAIBackendAPI:
                         "error_msg": policy_msg[:200],
                     })
                     raise ImageContentPolicyError(policy_msg, conversation_id or "")
+                # 兜底：回合已终结且全程无 image_gen 任务（未知拒绝变体）。
+                # 先 dry-run 打日志观察误伤率，确认无误伤后再由配置开启早退。
+                turn_ended_text = self._conversation_turn_ended_without_image(conversation)
+                if turn_ended_text:
+                    if config.image_refusal_early_exit_enabled:
+                        logger.warning({
+                            "event": "image_poll_conversation_turn_ended",
+                            "conversation_id": conversation_id,
+                            "attempt": attempt,
+                            "error_msg": turn_ended_text[:200],
+                        })
+                        raise ImageRefusalError(turn_ended_text, conversation_id or "")
+                    logger.info({
+                        "event": "image_poll_conversation_turn_ended_dry_run",
+                        "conversation_id": conversation_id,
+                        "attempt": attempt,
+                        "error_msg": turn_ended_text[:200],
+                    })
 
             logger.debug({"event": "image_poll_check", "conversation_id": conversation_id, "attempt": attempt,
                           "file_ids": file_ids, "sediment_ids": sediment_ids})
