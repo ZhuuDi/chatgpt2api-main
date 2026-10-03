@@ -594,6 +594,48 @@ class ConfigStore:
             return 3
 
     @property
+    def image_cooldown_enabled(self) -> bool:
+        """选号时跳过冷却中的账号；候选全部冷却时自动放行，冷却只影响优先级。"""
+        return bool(self.data.get("image_cooldown_enabled", True))
+
+    @property
+    def image_rate_limit_cooldown_secs(self) -> int:
+        """命中上游频控文案后的账号冷却时长（秒），连续命中按指数退避。"""
+        try:
+            return max(0, int(self.data.get("image_rate_limit_cooldown_secs", 900)))
+        except (TypeError, ValueError):
+            return 900
+
+    @property
+    def image_rate_limit_cooldown_max_secs(self) -> int:
+        try:
+            return max(60, int(self.data.get("image_rate_limit_cooldown_max_secs", 7200)))
+        except (TypeError, ValueError):
+            return 7200
+
+    @property
+    def image_timeout_cooldown_strikes(self) -> int:
+        """滚动窗口内静默超时累计达到该次数后冷却账号。"""
+        try:
+            return max(2, int(self.data.get("image_timeout_cooldown_strikes", 3)))
+        except (TypeError, ValueError):
+            return 3
+
+    @property
+    def image_timeout_cooldown_secs(self) -> int:
+        try:
+            return max(0, int(self.data.get("image_timeout_cooldown_secs", 600)))
+        except (TypeError, ValueError):
+            return 600
+
+    @property
+    def image_timeout_strike_window_secs(self) -> int:
+        try:
+            return max(60, int(self.data.get("image_timeout_strike_window_secs", 1800)))
+        except (TypeError, ValueError):
+            return 1800
+
+    @property
     def image_upload_min_remaining(self) -> int:
         """带输入图请求选号时，账号 file_upload 剩余额度低于该值即跳过；0 = 关闭预筛。
 
@@ -944,6 +986,12 @@ class ConfigStore:
         data["log_max_bytes"] = self.log_max_bytes
         data["log_backup_count"] = self.log_backup_count
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_cooldown_enabled"] = self.image_cooldown_enabled
+        data["image_rate_limit_cooldown_secs"] = self.image_rate_limit_cooldown_secs
+        data["image_rate_limit_cooldown_max_secs"] = self.image_rate_limit_cooldown_max_secs
+        data["image_timeout_cooldown_strikes"] = self.image_timeout_cooldown_strikes
+        data["image_timeout_cooldown_secs"] = self.image_timeout_cooldown_secs
+        data["image_timeout_strike_window_secs"] = self.image_timeout_strike_window_secs
         data["image_upload_min_remaining"] = self.image_upload_min_remaining
         data["image_upload_throttle_hours"] = self.image_upload_throttle_hours
         data["account_probe_rate_per_minute"] = self.account_probe_rate_per_minute

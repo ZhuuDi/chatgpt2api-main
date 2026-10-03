@@ -18,6 +18,7 @@ from services.image_storage_service import image_storage_service
 from services.openai_backend_api import (
     ImageContentPolicyError,
     ImagePollTimeoutError,
+    ImageRateLimitedError,
     ImageRefusalError,
     OpenAIBackendAPI,
     is_image_edit_refusal,
@@ -1398,12 +1399,15 @@ def _generate_single_image(
     MAX_POLL_TIMEOUT_RETRIES = 4
     # 误判拒绝（文生图被当成编辑已有图片）最大重试次数（换账号 + 新对话）
     MAX_REFUSAL_RETRIES = 3
+    # 上游频控（额度未耗尽的速度闸门）最大换号重试次数：失败是即时的，成本低于轮询超时
+    MAX_RATE_LIMIT_RETRIES = 4
 
     text_reply_retry_count = 0
     tls_retry_count = 0
     conn_timeout_retry_count = 0
     poll_timeout_retry_count = 0
     refusal_retry_count = 0
+    rate_limit_retry_count = 0
     account_email = ""
 
     # 单请求总预算：SSE 流 + 轮询 + 下载 + 重试共享同一 deadline（默认 180s），
@@ -1513,6 +1517,8 @@ def _generate_single_image(
             return outputs
         except ImagePollTimeoutError as exc:
             account_service.mark_image_result(token, False)
+            # 静默超时计 strike：同一账号窗口内连续超时达到阈值则短暂冷却
+            account_service.mark_image_timeout(token)
             if account_email:
                 setattr(exc, "account_email", account_email)
             # 轮询超时：换账号重试
@@ -1538,6 +1544,40 @@ def _generate_single_image(
                 })
                 raise
             raise
+        except ImageRateLimitedError as exc:
+            # 上游生图频率限制（额度未必耗尽）：标记账号冷却，立即换号重试。
+            account_service.mark_image_result(token, False)
+            account_service.mark_image_rate_limited(token, str(exc))
+            if account_email:
+                setattr(exc, "account_email", account_email)
+            rate_limit_retry_count += 1
+            if not returned_result and rate_limit_retry_count <= MAX_RATE_LIMIT_RETRIES and total_retry_count < retry_budget:
+                logger.warning({
+                    "event": "image_account_rate_limited_retry",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "retry_count": rate_limit_retry_count,
+                    "index": index,
+                    "error": str(exc)[:200],
+                })
+                total_retry_count += 1
+                continue
+            logger.warning({
+                "event": "image_account_rate_limited_exhausted_retries",
+                "request_token": token,
+                "account_email": account_email,
+                "retry_count": rate_limit_retry_count,
+                "index": index,
+            })
+            raise ImageGenerationError(
+                "Image generation hit upstream rate limiting; auto-switched accounts "
+                f"and retried {rate_limit_retry_count} times without success. Please try again later.",
+                status_code=429,
+                error_type="rate_limit_error",
+                code="upstream_rate_limited",
+                account_email=account_email,
+                conversation_id=getattr(exc, "conversation_id", ""),
+            ) from exc
         except ImageContentPolicyError as exc:
             account_service.mark_image_result(token, False)
             logger.warning({

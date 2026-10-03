@@ -50,6 +50,15 @@ class ImageContentPolicyError(ImageTaskError):
     pass
 
 
+class ImageRateLimitedError(ImageTaskError):
+    """上游触发生图频率限制（额度未耗尽的第二道速度闸门）。
+
+    与 ImageContentPolicyError 不同：该拒绝与提示词内容无关，换账号通常可立即
+    成功，因此调用方应标记账号冷却并立即换号重试，而不是把 400/超时返回给客户端。
+    """
+    pass
+
+
 class ImageRefusalError(ImageTaskError):
     """上游把文生图误判为「编辑/还原已有图片」并文本拒绝（无可用图片目标）。
 
@@ -139,6 +148,27 @@ def _is_content_policy_error(error_msg: str) -> bool:
         return False
     msg_lower = error_msg.lower()
     return any(keyword in msg_lower for keyword in _CONTENT_POLICY_KEYWORDS)
+
+
+# 上游生图频率限制的特征表述（第二道速度闸门，账号额度未必耗尽）。
+# 注意「频率限制」是各类文案（触发了生成频率限制/使用频率限制等）的稳定公共子串。
+_IMAGE_RATE_LIMIT_KEYWORDS = (
+    "频率限制",
+    "rate limit",
+    "too many requests",
+)
+
+
+def is_image_rate_limit_error(error_msg: str) -> bool:
+    """检查错误消息是否为上游生图频率限制。
+
+    必须在内容政策检测之前调用：这类文案常含「无法生成」等词，
+    会被 _CONTENT_POLICY_KEYWORDS 误归类为政策拒绝（400 且不换号）。
+    """
+    if not error_msg:
+        return False
+    msg_lower = error_msg.lower()
+    return any(keyword in msg_lower for keyword in _IMAGE_RATE_LIMIT_KEYWORDS)
 
 
 # 上游把文生图误判为「编辑/还原已有图片」的拒绝特征。
@@ -2174,6 +2204,18 @@ class OpenAIBackendAPI:
         return ""
 
     @classmethod
+    def _find_rate_limit_error_in_conversation(cls, data: Dict[str, Any]) -> str:
+        """从对话文档中查找生图频率限制文本。
+
+        额度未耗尽但触发上游速度风控时，模型会在 assistant 消息里回复
+        「触发了（生成/使用）频率限制」并结束回合——继续轮询永远等不到图片。
+        """
+        for _role, msg_text in cls._iter_conversation_message_texts(data):
+            if is_image_rate_limit_error(msg_text):
+                return msg_text[:500]
+        return ""
+
+    @classmethod
     def _find_image_refusal_in_conversation(cls, data: Dict[str, Any]) -> str:
         """从对话文档中查找「误判为编辑已有图片」的拒绝文本。
 
@@ -2348,6 +2390,15 @@ class OpenAIBackendAPI:
             # 而非 /backend-api/tasks/ 的 task error 结构中。
             # 如果在没有找到图片文件 ID 的同时检测到拒绝，立即中断轮询。
             if not file_ids and not sediment_ids:
+                rate_limit_msg = self._find_rate_limit_error_in_conversation(conversation)
+                if rate_limit_msg:
+                    logger.info({
+                        "event": "image_poll_conversation_rate_limited",
+                        "conversation_id": conversation_id,
+                        "attempt": attempt,
+                        "error_msg": rate_limit_msg[:200],
+                    })
+                    raise ImageRateLimitedError(rate_limit_msg, conversation_id or "")
                 refusal_msg = self._find_image_refusal_in_conversation(conversation)
                 if refusal_msg:
                     logger.warning({
@@ -2643,6 +2694,8 @@ class OpenAIBackendAPI:
                 task_error = getattr(exc, "task_error", "")
                 if not file_ids and not sediment_ids:
                     if task_error:
+                        if is_image_rate_limit_error(task_error):
+                            raise ImageRateLimitedError(task_error, conversation_id or "") from exc
                         raise ImageContentPolicyError(task_error, conversation_id or "") from exc
                     raise
                 logger.warning({

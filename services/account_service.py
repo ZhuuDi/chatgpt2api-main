@@ -75,6 +75,11 @@ class AccountService:
         self._dirty = False
         self._flush_scheduled = False
         self._flush_interval = 15.0
+        # 生图账号冷却状态（频控文案/连续超时）：token -> {until, reason, strikes, ...}
+        # 独立于账号的 24h 限流状态；只影响选号优先级，候选全部冷却时自动放行。
+        self._cooldown_lock = Lock()
+        self._image_cooldowns: dict[str, dict[str, Any]] = {}
+        self._load_image_cooldowns()
 
     def _get_cumulative_file(self) -> Path:
         from services.config import DATA_DIR
@@ -1019,12 +1024,23 @@ class AccountService:
             needs_upload: bool = False,
     ) -> list[str]:
         max_concurrency = max(1, int(config.image_account_concurrency or 1))
-        return [
+        available = [
             token
             for token in self._list_ready_candidate_tokens(
                 excluded_tokens, plan_type, source_type, plan_types, needs_upload)
             if int(self._image_inflight.get(token, 0)) < max_concurrency
         ]
+        if not config.image_cooldown_enabled or not available:
+            return available
+        with self._cooldown_lock:
+            cool_free = [
+                token for token in available
+                if not self._is_image_cooling(token)
+            ]
+        if cool_free:
+            return cool_free
+        # 保底：候选全部处于冷却时放行冷却账号，冷却只影响优先级，避免自我锁死。
+        return available
 
     def _acquire_next_candidate_token(
             self,
@@ -1551,10 +1567,126 @@ class AccountService:
                 return False
         return True
 
+    def _get_cooldown_file(self) -> Path:
+        from services.config import DATA_DIR
+        return DATA_DIR / "image_cooldowns.json"
+
+    def _load_image_cooldowns(self) -> None:
+        try:
+            f = self._get_cooldown_file()
+            if f.exists():
+                data = json.loads(f.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self._image_cooldowns = {
+                        str(token): item
+                        for token, item in data.items()
+                        if isinstance(item, dict)
+                    }
+        except Exception:
+            self._image_cooldowns = {}
+        self._prune_image_cooldowns()
+
+    def _save_image_cooldowns(self) -> None:
+        try:
+            payload = json.dumps(self._image_cooldowns, ensure_ascii=False)
+            tmp = self._get_cooldown_file().with_suffix(".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            tmp.replace(self._get_cooldown_file())
+        except Exception:
+            pass
+
+    def _prune_image_cooldowns(self) -> None:
+        now = time.time()
+        expired = [
+            token for token, item in self._image_cooldowns.items()
+            if float(item.get("until") or 0) <= now and not item.get("strikes")
+        ]
+        for token in expired:
+            self._image_cooldowns.pop(token, None)
+
+    def _is_image_cooling(self, access_token: str) -> bool:
+        item = self._image_cooldowns.get(access_token)
+        return bool(item and float(item.get("until") or 0) > time.time())
+
+    def mark_image_rate_limited(self, access_token: str, reason: str = "") -> None:
+        """命中上游频控文案：冷却该账号（指数退避），冷却期内选号跳过。"""
+        if not access_token or not config.image_cooldown_enabled:
+            return
+        base = max(0, config.image_rate_limit_cooldown_secs)
+        if base <= 0:
+            return
+        ceiling = config.image_rate_limit_cooldown_max_secs
+        now = time.time()
+        with self._cooldown_lock:
+            item = self._image_cooldowns.get(access_token) or {}
+            if float(item.get("until") or 0) <= now:
+                item["strikes"] = 0
+            strikes = int(item.get("strikes") or 0) + 1
+            until = now + min(base * (2 ** (strikes - 1)), ceiling)
+            self._image_cooldowns[access_token] = {
+                "until": until,
+                "reason": "rate_limit",
+                "detail": str(reason or "")[:200],
+                "strikes": strikes,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            self._prune_image_cooldowns()
+            self._save_image_cooldowns()
+
+    def mark_image_timeout(self, access_token: str) -> None:
+        """静默超时计 strike：窗口内累计达到阈值才冷却（弱信号，避免误伤面过大）。"""
+        if not access_token or not config.image_cooldown_enabled:
+            return
+        threshold = config.image_timeout_cooldown_strikes
+        window = config.image_timeout_strike_window_secs
+        duration = max(0, config.image_timeout_cooldown_secs)
+        if duration <= 0:
+            return
+        now = time.time()
+        with self._cooldown_lock:
+            item = self._image_cooldowns.get(access_token) or {}
+            strikes = int(item.get("strikes") or 0)
+            last_at = float(item.get("last_strike_at") or 0)
+            if now - last_at > window:
+                strikes = 0
+            strikes += 1
+            entry = {
+                "reason": item.get("reason") if float(item.get("until") or 0) > now else "",
+                "until": float(item.get("until") or 0),
+                "detail": item.get("detail") or "",
+                "strikes": strikes,
+                "last_strike_at": now,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if strikes >= threshold:
+                entry["reason"] = "timeout"
+                entry["until"] = now + duration
+            self._image_cooldowns[access_token] = entry
+            self._prune_image_cooldowns()
+            self._save_image_cooldowns()
+
+    def _clear_image_cooldown(self, access_token: str) -> None:
+        """成功出图即清除该账号的冷却与 strike 记录。"""
+        if not access_token:
+            return
+        with self._cooldown_lock:
+            if self._image_cooldowns.pop(access_token, None) is not None:
+                self._save_image_cooldowns()
+
+    def image_cooldown_count(self) -> int:
+        now = time.time()
+        with self._cooldown_lock:
+            return sum(
+                1 for item in self._image_cooldowns.values()
+                if float(item.get("until") or 0) > now
+            )
+
     def mark_image_result(self, access_token: str, success: bool) -> dict | None:
         if not access_token:
             return None
         self.release_image_slot(access_token)
+        if success:
+            self._clear_image_cooldown(access_token)
         with self._lock:
             access_token = self._resolve_access_token_locked(access_token)
             current = self._accounts.get(access_token)
@@ -1624,19 +1756,35 @@ class AccountService:
         )
         return dict(account)
 
-    def summarize_uploadable_image_quota(self) -> dict[str, int]:
+    def image_cooling_reasons(self) -> dict[str, str]:
+        """当前冷却中的 token -> 原因（rate_limit/timeout），供聚合统计使用。"""
+        now = time.time()
+        with self._cooldown_lock:
+            return {
+                token: str(item.get("reason") or "other")
+                for token, item in self._image_cooldowns.items()
+                if float(item.get("until") or 0) > now
+            }
+
+    def summarize_uploadable_image_quota(self) -> dict[str, Any]:
         """带参考图请求可用的生图额度聚合（供公开监控接口使用，不含账号明细）。
 
         过滤口径与选号 needs_upload=True 完全同源：
         _is_image_account_available + _is_upload_available，保证数字与实际路由行为一致。
         excluded_* 为「生图可用但上传不可用」被排除的账号数与额度。
+        cooling_* 为其中正处于频控/超时冷却的账号与额度（额度未丢，但立即可路由性受限）；
+        usable_* = 总量 - 冷却，代表"现在就能接请求"的容量，供注册机/监控做决策。
         """
         with self._lock:
             accounts = [dict(item) for item in self._accounts.values()]
+        cooling_map = self.image_cooling_reasons()
         total_quota = 0
         uploadable = 0
         excluded = 0
         excluded_quota = 0
+        cooling_accounts = 0
+        cooling_quota = 0
+        reason_breakdown: dict[str, int] = {}
         for acct in accounts:
             quota_val = max(0, int(acct.get("quota") or 0))
             if not self._is_image_account_available(acct):
@@ -1644,6 +1792,12 @@ class AccountService:
             if self._is_upload_available(acct):
                 uploadable += 1
                 total_quota += quota_val
+                token = acct.get("access_token") or ""
+                reason = cooling_map.get(token)
+                if reason is not None:
+                    cooling_accounts += 1
+                    cooling_quota += quota_val
+                    reason_breakdown[reason] = reason_breakdown.get(reason, 0) + 1
             else:
                 excluded += 1
                 excluded_quota += quota_val
@@ -1652,6 +1806,12 @@ class AccountService:
             "uploadable_accounts": uploadable,
             "excluded_accounts": excluded,
             "excluded_quota": excluded_quota,
+            "cooling_accounts": cooling_accounts,
+            "cooling_quota": cooling_quota,
+            "usable_accounts": max(0, uploadable - cooling_accounts),
+            "usable_quota": max(0, total_quota - cooling_quota),
+            "cooling_ratio": round(cooling_accounts / uploadable, 4) if uploadable else 0.0,
+            "reason_breakdown": reason_breakdown,
         }
 
     def _get_remote_info_cache(self, access_token: str) -> dict[str, Any] | None:
@@ -2068,6 +2228,14 @@ class AccountService:
         for a in items:
             t = a.get("type", "unknown")
             by_type[t] = by_type.get(t, 0) + 1
+        cooling = 0
+        with self._cooldown_lock:
+            now_ts = time.time()
+            cooling = sum(
+                1 for a in items
+                if (tok := a.get("access_token"))
+                and float((self._image_cooldowns.get(tok) or {}).get("until") or 0) > now_ts
+            )
         return {
             "total": total,
             "cumulative_total": self._cumulative_total,
@@ -2076,6 +2244,7 @@ class AccountService:
             "abnormal": abnormal,
             "disabled": disabled,
             "unprobed": unprobed,
+            "cooling": cooling,
             "total_quota": total_quota,
             "total_success": total_success,
             "total_fail": total_fail,

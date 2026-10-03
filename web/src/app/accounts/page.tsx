@@ -18,6 +18,7 @@ import {
   Pencil,
   RefreshCw,
   Search,
+  Snowflake,
   Trash2,
   UserRound,
 } from "lucide-react";
@@ -92,6 +93,7 @@ const metricCards = [
   { key: "total", label: "账户总数", color: "text-stone-900", icon: UserRound },
   { key: "active", label: "正常账户", color: "text-emerald-600", icon: CheckCircle2 },
   { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
+  { key: "cooling", label: "冷却账户", color: "text-violet-500", icon: Snowflake },
   { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
   { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
   { key: "unprobed", label: "未探测", color: "text-amber-500", icon: Hourglass },
@@ -216,6 +218,7 @@ function AccountsPageContent() {
           abnormal: data.summary.abnormal,
           disabled: data.summary.disabled,
           unprobed: data.summary.unprobed,
+          cooling: data.summary.cooling ?? 0,
           quota: data.summary.total_quota ?? 0,
         });
         setTypeOptions(Object.keys(data.summary.by_type ?? {}));
@@ -303,6 +306,7 @@ function AccountsPageContent() {
         abnormal: 0,
         disabled: 0,
         unprobed: 0,
+        cooling: 0,
         quota: 0,
       },
     [summaryState],
@@ -638,7 +642,9 @@ function AccountsPageContent() {
                 active: runningActive,
                 limited: baseLimited,
                 abnormal: runningAbnormal,
-                disabled: runningDisabled,
+                disabled: summary.disabled,
+                unprobed: summary.unprobed,
+                cooling: summary.cooling,
                 quota: summary.quota,
               });
             }
@@ -872,19 +878,19 @@ function AccountsPageContent() {
       </Dialog>
 
       <section className="space-y-3">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-4 xl:grid-cols-8">
           {metricCards.map((item) => {
             const Icon = item.icon;
             const value = (refreshSummary ?? summary)[item.key];
             return (
               <Card key={item.key} className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
-                <CardContent className="p-4">
-                  <div className="mb-4 flex items-start justify-between">
-                    <span className="text-xs font-medium text-stone-400">{item.label}</span>
-                    <Icon className="size-4 text-stone-400" />
+                <CardContent className="px-3 py-2.5">
+                  <div className="mb-2 flex items-start justify-between gap-1">
+                    <span className="text-xs font-medium whitespace-nowrap text-stone-400">{item.label}</span>
+                    <Icon className="size-3.5 shrink-0 text-stone-400" />
                   </div>
-                  <div className={cn("text-[1.75rem] font-semibold tracking-tight", item.color)}>
-                    <span className={typeof value === "number" ? "" : "text-[1.1rem]"}>
+                  <div className={cn("text-[1.4rem] font-semibold tracking-tight", item.color)}>
+                    <span className={typeof value === "number" ? "" : "text-[1.05rem]"}>
                       {typeof value === "number" ? formatCompact(value) : value}
                     </span>
                   </div>
