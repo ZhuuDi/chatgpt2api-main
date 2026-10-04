@@ -2229,13 +2229,20 @@ class AccountService:
             t = a.get("type", "unknown")
             by_type[t] = by_type.get(t, 0) + 1
         cooling = 0
+        usable_cnt = 0
         with self._cooldown_lock:
             now_ts = time.time()
-            cooling = sum(
-                1 for a in items
-                if (tok := a.get("access_token"))
-                and float((self._image_cooldowns.get(tok) or {}).get("until") or 0) > now_ts
-            )
+            for a in items:
+                tok = a.get("access_token")
+                in_cool = bool(tok) and float(
+                    (self._image_cooldowns.get(tok) or {}).get("until") or 0) > now_ts
+                if in_cool:
+                    cooling += 1
+                # 实际可立即接单的账号：正常 + 有额度 + 不在冷却
+                if (a.get("status") == "正常"
+                        and int(a.get("quota") or 0) > 0
+                        and not in_cool):
+                    usable_cnt += 1
         return {
             "total": total,
             "cumulative_total": self._cumulative_total,
@@ -2245,6 +2252,9 @@ class AccountService:
             "disabled": disabled,
             "unprobed": unprobed,
             "cooling": cooling,
+            "usable_accounts": usable_cnt,
+            # 按每小时 5 张/号 的实测安全速率折算的小时供给能力
+            "usable_hourly": usable_cnt * 5,
             "total_quota": total_quota,
             "total_success": total_success,
             "total_fail": total_fail,

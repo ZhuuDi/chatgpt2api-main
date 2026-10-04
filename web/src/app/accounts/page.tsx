@@ -11,6 +11,7 @@ import {
   CircleOff,
   Copy,
   Download,
+  Gauge,
   Hourglass,
   Link2,
   LoaderCircle,
@@ -95,7 +96,7 @@ const metricCards = [
   { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
   { key: "cooling", label: "冷却账户", color: "text-violet-500", icon: Snowflake },
   { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
-  { key: "disabled", label: "禁用账户", color: "text-stone-500", icon: Ban },
+  { key: "usable_hourly", label: "实际可用额度", color: "text-cyan-600", icon: Gauge },
   { key: "unprobed", label: "未探测", color: "text-amber-500", icon: Hourglass },
   { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
 ] as const;
@@ -216,9 +217,9 @@ function AccountsPageContent() {
           active: data.summary.active,
           limited: data.summary.limited,
           abnormal: data.summary.abnormal,
-          disabled: data.summary.disabled,
           unprobed: data.summary.unprobed,
           cooling: data.summary.cooling ?? 0,
+          usable_hourly: data.summary.usable_hourly ?? 0,
           quota: data.summary.total_quota ?? 0,
         });
         setTypeOptions(Object.keys(data.summary.by_type ?? {}));
@@ -304,9 +305,9 @@ function AccountsPageContent() {
         active: 0,
         limited: 0,
         abnormal: 0,
-        disabled: 0,
         unprobed: 0,
         cooling: 0,
+        usable_hourly: 0,
         quota: 0,
       },
     [summaryState],
@@ -642,9 +643,9 @@ function AccountsPageContent() {
                 active: runningActive,
                 limited: baseLimited,
                 abnormal: runningAbnormal,
-                disabled: summary.disabled,
                 unprobed: summary.unprobed,
                 cooling: summary.cooling,
+                usable_hourly: summary.usable_hourly,
                 quota: summary.quota,
               });
             }
