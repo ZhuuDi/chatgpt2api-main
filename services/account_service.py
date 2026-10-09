@@ -2230,6 +2230,8 @@ class AccountService:
             by_type[t] = by_type.get(t, 0) + 1
         cooling = 0
         usable_cnt = 0
+        upload_remaining = 0
+        upload_ready = 0
         with self._cooldown_lock:
             now_ts = time.time()
             for a in items:
@@ -2239,10 +2241,25 @@ class AccountService:
                 if in_cool:
                     cooling += 1
                 # 实际可立即接单的账号：正常 + 有额度 + 不在冷却
-                if (a.get("status") == "正常"
-                        and int(a.get("quota") or 0) > 0
-                        and not in_cool):
+                q = int(a.get("quota") or 0)
+                st_ok = a.get("status") == "正常"
+                if st_ok and q > 0 and not in_cool:
                     usable_cnt += 1
+                # 文件上传额度统计（上游 limits_progress 的 file_upload 剩余次数）
+                fu = None
+                lp = a.get("limits_progress")
+                if isinstance(lp, list):
+                    for it in lp:
+                        if isinstance(it, dict) and it.get("feature_name") == "file_upload":
+                            try:
+                                fu = max(0, int(it.get("remaining") or 0))
+                            except (TypeError, ValueError):
+                                fu = None
+                            break
+                if fu is not None:
+                    upload_remaining += fu
+                    if st_ok and q > 0 and not in_cool and fu > 0:
+                        upload_ready += 1
         return {
             "total": total,
             "cumulative_total": self._cumulative_total,
@@ -2255,6 +2272,8 @@ class AccountService:
             "usable_accounts": usable_cnt,
             # 按每小时 5 张/号 的实测安全速率折算的小时供给能力
             "usable_hourly": usable_cnt * 5,
+            "upload_remaining": upload_remaining,
+            "upload_ready_accounts": upload_ready,
             "total_quota": total_quota,
             "total_success": total_success,
             "total_fail": total_fail,

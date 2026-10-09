@@ -21,6 +21,7 @@ import {
   Search,
   Snowflake,
   Trash2,
+  Upload,
   UserRound,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -97,6 +98,7 @@ const metricCards = [
   { key: "cooling", label: "冷却账户", color: "text-violet-500", icon: Snowflake },
   { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
   { key: "usable_hourly", label: "实际可用额度", color: "text-cyan-600", icon: Gauge },
+  { key: "upload_remaining", label: "上传额度", color: "text-teal-600", icon: Upload, subKey: "upload_ready_accounts" },
   { key: "unprobed", label: "未探测", color: "text-amber-500", icon: Hourglass },
   { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
 ] as const;
@@ -220,6 +222,8 @@ function AccountsPageContent() {
           unprobed: data.summary.unprobed,
           cooling: data.summary.cooling ?? 0,
           usable_hourly: data.summary.usable_hourly ?? 0,
+          upload_remaining: data.summary.upload_remaining ?? 0,
+          upload_ready_accounts: data.summary.upload_ready_accounts ?? 0,
           quota: data.summary.total_quota ?? 0,
         });
         setTypeOptions(Object.keys(data.summary.by_type ?? {}));
@@ -308,6 +312,8 @@ function AccountsPageContent() {
         unprobed: 0,
         cooling: 0,
         usable_hourly: 0,
+        upload_remaining: 0,
+        upload_ready_accounts: 0,
         quota: 0,
       },
     [summaryState],
@@ -646,6 +652,8 @@ function AccountsPageContent() {
                 unprobed: summary.unprobed,
                 cooling: summary.cooling,
                 usable_hourly: summary.usable_hourly,
+                upload_remaining: summary.upload_remaining,
+                upload_ready_accounts: summary.upload_ready_accounts,
                 quota: summary.quota,
               });
             }
@@ -879,10 +887,11 @@ function AccountsPageContent() {
       </Dialog>
 
       <section className="space-y-3">
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-4 xl:grid-cols-8">
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-9">
           {metricCards.map((item) => {
             const Icon = item.icon;
-            const value = (refreshSummary ?? summary)[item.key];
+            const snap = refreshSummary ?? summary;
+            const value = snap[item.key];
             return (
               <Card key={item.key} className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
                 <CardContent className="px-3 py-2.5">
@@ -895,6 +904,11 @@ function AccountsPageContent() {
                       {typeof value === "number" ? formatCompact(value) : value}
                     </span>
                   </div>
+                  {"subKey" in item ? (
+                    <div className="mt-0.5 text-[11px] leading-4 text-stone-400">
+                      可接编辑单 {Number(snap[item.subKey] || 0)} 个
+                    </div>
+                  ) : null}
                 </CardContent>
               </Card>
             );
