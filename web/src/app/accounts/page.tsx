@@ -92,15 +92,70 @@ const statusMeta: Record<
 };
 
 const metricCards = [
-  { key: "total", label: "账户总数", color: "text-stone-900", icon: UserRound },
-  { key: "active", label: "正常账户", color: "text-emerald-600", icon: CheckCircle2 },
-  { key: "limited", label: "限流账户", color: "text-orange-500", icon: CircleAlert },
-  { key: "cooling", label: "冷却账户", color: "text-violet-500", icon: Snowflake },
-  { key: "abnormal", label: "异常账户", color: "text-rose-500", icon: CircleOff },
-  { key: "usable_hourly", label: "实际可用额度", color: "text-cyan-600", icon: Gauge },
-  { key: "upload_remaining", label: "上传额度", color: "text-teal-600", icon: Upload, subKey: "upload_ready_accounts" },
-  { key: "unprobed", label: "未探测", color: "text-amber-500", icon: Hourglass },
-  { key: "quota", label: "剩余额度", color: "text-blue-500", icon: RefreshCw },
+  {
+    key: "routable_quota",
+    label: "可接单容量",
+    color: "text-emerald-600",
+    icon: Gauge,
+    unit: "额度",
+    subKey: "routable_accounts",
+    subSuffix: "个号可路由",
+    tone: "routable",
+  },
+  {
+    key: "upload_remaining",
+    label: "可用上传余量",
+    color: "text-teal-600",
+    icon: Upload,
+    unit: "次",
+    subKey: "limited_upload_remaining",
+    subSuffix: "次锁在限流号上（出图额度为 0）",
+    tone: "neutral",
+  },
+  {
+    key: "excluded_accounts",
+    label: "排除诊断",
+    color: "text-orange-500",
+    icon: CircleAlert,
+    unit: "个号",
+    subKey: "excluded_quota",
+    subSuffix: "额度因上传门槛不可路由",
+    subKey2: "recoverable_24h_quota",
+    subSuffix2: "额度 24 小时内自动恢复",
+    tone: "excluded",
+  },
+  {
+    key: "recent_success",
+    label: "近 1 小时产出",
+    color: "text-sky-600",
+    icon: CheckCircle2,
+    unit: "张",
+    subKey: "recent_failed",
+    subSuffix: "次失败（近 60 分钟）",
+    tone: "neutral",
+  },
+  {
+    key: "restore_hours",
+    label: "恢复预期",
+    color: "text-stone-700",
+    icon: Hourglass,
+    unit: "小时后",
+    subKey: "restore_accounts",
+    subSuffix: "个限流号同批恢复",
+    subKey2: "restore_24h_accounts",
+    subSuffix2: "个限流号 24 小时内回池",
+    tone: "neutral",
+  },
+] as const;
+
+const poolStatusBadges = [
+  { key: "total", label: "总数" },
+  { key: "active", label: "正常" },
+  { key: "limited", label: "限流" },
+  { key: "abnormal", label: "异常" },
+  { key: "disabled", label: "禁用" },
+  { key: "unprobed", label: "未探测" },
+  { key: "cooling", label: "冷却" },
 ] as const;
 
 function formatCompact(value: number) {
@@ -214,6 +269,34 @@ function AccountsPageContent() {
       setAccounts(data.items);
       setTotal(data.total ?? data.items.length);
       if (data.summary) {
+        const summaryExtras = data.summary as typeof data.summary & {
+          routable_quota?: number;
+          routable_accounts?: number;
+          uploadable_accounts?: number;
+          all_upload_remaining?: number;
+          limited_upload_remaining?: number;
+          recoverable_24h_accounts?: number;
+          recoverable_24h_quota?: number;
+          restore_24h_accounts?: number;
+          excluded_accounts?: number;
+          excluded_quota?: number;
+          excluded_low_upload?: number;
+          excluded_upload_429?: number;
+          restore_accounts?: number;
+          next_restore_at?: string;
+          recent_calls?: { success?: number; failed?: number };
+        };
+        const restoreHours = (() => {
+          const raw = summaryExtras.next_restore_at;
+          if (!raw) {
+            return 0;
+          }
+          const ts = new Date(raw).getTime();
+          if (Number.isNaN(ts)) {
+            return 0;
+          }
+          return Math.max(0, Math.ceil((ts - Date.now()) / (1000 * 60 * 60)));
+        })();
         setSummaryState({
           total: data.summary.total,
           active: data.summary.active,
@@ -221,9 +304,24 @@ function AccountsPageContent() {
           abnormal: data.summary.abnormal,
           unprobed: data.summary.unprobed,
           cooling: data.summary.cooling ?? 0,
-          usable_hourly: data.summary.usable_hourly ?? 0,
+          routable_quota: summaryExtras.routable_quota ?? 0,
+          routable_accounts: summaryExtras.routable_accounts ?? 0,
+          uploadable_accounts: summaryExtras.uploadable_accounts ?? 0,
           upload_remaining: data.summary.upload_remaining ?? 0,
+          all_upload_remaining: summaryExtras.all_upload_remaining ?? 0,
+          limited_upload_remaining: summaryExtras.limited_upload_remaining ?? 0,
           upload_ready_accounts: data.summary.upload_ready_accounts ?? 0,
+          excluded_accounts: summaryExtras.excluded_accounts ?? 0,
+          excluded_quota: summaryExtras.excluded_quota ?? 0,
+          excluded_low_upload: summaryExtras.excluded_low_upload ?? 0,
+          excluded_upload_429: summaryExtras.excluded_upload_429 ?? 0,
+          recoverable_24h_accounts: summaryExtras.recoverable_24h_accounts ?? 0,
+          recoverable_24h_quota: summaryExtras.recoverable_24h_quota ?? 0,
+          restore_24h_accounts: summaryExtras.restore_24h_accounts ?? 0,
+          restore_accounts: summaryExtras.restore_accounts ?? 0,
+          restore_hours: restoreHours,
+          recent_success: summaryExtras.recent_calls?.success ?? 0,
+          recent_failed: summaryExtras.recent_calls?.failed ?? 0,
           quota: data.summary.total_quota ?? 0,
         });
         setTypeOptions(Object.keys(data.summary.by_type ?? {}));
@@ -311,9 +409,24 @@ function AccountsPageContent() {
         abnormal: 0,
         unprobed: 0,
         cooling: 0,
-        usable_hourly: 0,
+        routable_quota: 0,
+        routable_accounts: 0,
+        uploadable_accounts: 0,
         upload_remaining: 0,
+        all_upload_remaining: 0,
+        limited_upload_remaining: 0,
         upload_ready_accounts: 0,
+        excluded_accounts: 0,
+        excluded_quota: 0,
+        excluded_low_upload: 0,
+        excluded_upload_429: 0,
+        recoverable_24h_accounts: 0,
+        recoverable_24h_quota: 0,
+        restore_24h_accounts: 0,
+        restore_accounts: 0,
+        restore_hours: 0,
+        recent_success: 0,
+        recent_failed: 0,
         quota: 0,
       },
     [summaryState],
@@ -651,9 +764,13 @@ function AccountsPageContent() {
                 abnormal: runningAbnormal,
                 unprobed: summary.unprobed,
                 cooling: summary.cooling,
-                usable_hourly: summary.usable_hourly,
+                routable_quota: (summary as Record<string, number>).routable_quota ?? 0,
+                routable_accounts: (summary as Record<string, number>).routable_accounts ?? 0,
+                uploadable_accounts: (summary as Record<string, number>).uploadable_accounts ?? 0,
                 upload_remaining: summary.upload_remaining,
                 upload_ready_accounts: summary.upload_ready_accounts,
+                excluded_accounts: (summary as Record<string, number>).excluded_accounts ?? 0,
+                excluded_quota: (summary as Record<string, number>).excluded_quota ?? 0,
                 quota: summary.quota,
               });
             }
@@ -887,7 +1004,7 @@ function AccountsPageContent() {
       </Dialog>
 
       <section className="space-y-3">
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-9">
+        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5">
           {metricCards.map((item) => {
             const Icon = item.icon;
             const snap = refreshSummary ?? summary;
@@ -899,20 +1016,48 @@ function AccountsPageContent() {
                     <span className="text-xs font-medium whitespace-nowrap text-stone-400">{item.label}</span>
                     <Icon className="size-3.5 shrink-0 text-stone-400" />
                   </div>
-                  <div className={cn("text-[1.4rem] font-semibold tracking-tight", item.color)}>
-                    <span className={typeof value === "number" ? "" : "text-[1.05rem]"}>
+                  <div className={cn("flex items-baseline gap-1", item.color)}>
+                    <span className="text-[1.4rem] font-semibold tracking-tight">
                       {typeof value === "number" ? formatCompact(value) : value}
                     </span>
+                    <span className="text-[11px] font-normal text-stone-400">{item.unit}</span>
                   </div>
-                  {"subKey" in item ? (
-                    <div className="mt-0.5 text-[11px] leading-4 text-stone-400">
-                      可接编辑单 {Number(snap[item.subKey] || 0)} 个
-                    </div>
-                  ) : null}
+                  <div className="mt-0.5 text-[11px] leading-4 text-stone-400">
+                    {Number(snap[item.subKey] || 0)} {item.subSuffix}
+                  </div>
+                  {(() => {
+                    const extra = item as {
+                      subKey2?: string;
+                      subSuffix2?: string;
+                    };
+                    if (!extra.subKey2) {
+                      return null;
+                    }
+                    return (
+                      <div className="text-[11px] leading-4 text-stone-400">
+                        {Number(snap[extra.subKey2] || 0)} {extra.subSuffix2}
+                      </div>
+                    );
+                  })()}
                 </CardContent>
               </Card>
             );
           })}
+          <div className="col-span-full flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl bg-white/60 px-3 py-2 text-[11px] text-stone-500">
+            {poolStatusBadges.map((badge) => (
+              <span key={badge.key} className="inline-flex items-center gap-1">
+                <span className="text-stone-400">{badge.label}</span>
+                <span className="font-semibold text-stone-600">
+                  {Number((refreshSummary ?? summary)[badge.key] || 0)}
+                </span>
+              </span>
+            ))}
+            <span className="ml-auto text-stone-400">
+              排除构成：上传余量不足 {Number((refreshSummary ?? summary).excluded_low_upload || 0)} ·
+              429 未解封 {Number((refreshSummary ?? summary).excluded_upload_429 || 0)} ·
+              24h 内可恢复 {Number((refreshSummary ?? summary).recoverable_24h_quota || 0)} 额度
+            </span>
+          </div>
         </div>
         <Card className="rounded-2xl border-white/80 bg-white/90 shadow-sm">
           <CardContent className="p-4">

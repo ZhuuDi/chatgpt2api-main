@@ -235,6 +235,7 @@ def create_router() -> APIRouter:
             offset=offset,
         )
         stats = account_service.get_stats()
+        stats["recent_calls"] = account_service.recent_call_stats(60)
         return {
             "items": items,
             "total": total,

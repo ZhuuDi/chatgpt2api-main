@@ -1767,26 +1767,44 @@ class AccountService:
             }
 
     def summarize_uploadable_image_quota(self) -> dict[str, Any]:
-        """带参考图请求可用的生图额度聚合（供公开监控接口使用，不含账号明细）。
+        """带参考图请求可用的生图额度聚合（公开监控接口，不含账号明细）。
 
-        过滤口径与选号 needs_upload=True 完全同源：
-        _is_image_account_available + _is_upload_available，保证数字与实际路由行为一致。
-        excluded_* 为「生图可用但上传不可用」被排除的账号数与额度。
-        cooling_* 为其中正处于频控/超时冷却的账号与额度（额度未丢，但立即可路由性受限）；
-        usable_* = 总量 - 冷却，代表"现在就能接请求"的容量，供注册机/监控做决策。
+        过滤口径与选号 needs_upload=True 同源（_is_image_account_available + 上传可用），
+        并额外给出「未来 24h 供给」与「排除原因细分」，供注册机做补号决策：
+          routable_*     现在就能接单的额度/账号（已过上传门槛与冷却）
+          recoverable_*  当前被排除、但在 24h 内会自动恢复的额度/账号
+          restore_*      限流号（image_gen 归零）中将在 24h 内回池的账号数
         """
         with self._lock:
             accounts = [dict(item) for item in self._accounts.values()]
         cooling_map = self.image_cooling_reasons()
+        now_dt = datetime.now(timezone.utc)
+        deadline = now_dt + timedelta(hours=24)
+        min_upload = config.image_upload_min_remaining
         total_quota = 0
         uploadable = 0
         excluded = 0
         excluded_quota = 0
+        excluded_low_upload = 0
+        excluded_upload_429 = 0
+        recoverable_accounts = 0
+        recoverable_quota = 0
         cooling_accounts = 0
         cooling_quota = 0
+        restore_due: list[datetime] = []
+        restore_24h_accounts = 0
         reason_breakdown: dict[str, int] = {}
+
         for acct in accounts:
             quota_val = max(0, int(acct.get("quota") or 0))
+            # 限流号：image_gen 已归零，本日无法出图，单独统计回池时间
+            if str(acct.get("status") or "") == "限流":
+                restore_at = self._parse_time(acct.get("restore_at"))
+                if restore_at is not None and restore_at > now_dt:
+                    restore_due.append(restore_at)
+                    if restore_at <= deadline:
+                        restore_24h_accounts += 1
+                continue
             if not self._is_image_account_available(acct):
                 continue
             if self._is_upload_available(acct):
@@ -1798,20 +1816,52 @@ class AccountService:
                     cooling_accounts += 1
                     cooling_quota += quota_val
                     reason_breakdown[reason] = reason_breakdown.get(reason, 0) + 1
+                continue
+
+            excluded += 1
+            excluded_quota += quota_val
+            upload_restore = self._parse_time(acct.get("upload_restore_at"))
+            if upload_restore is not None and upload_restore > now_dt:
+                excluded_upload_429 += 1
+                recover_at = upload_restore
             else:
-                excluded += 1
-                excluded_quota += quota_val
+                excluded_low_upload += 1
+                recover_at = None
+                limits = acct.get("limits_progress")
+                if isinstance(limits, list):
+                    for feature in limits:
+                        if isinstance(feature, dict) and feature.get("feature_name") == "file_upload":
+                            recover_at = self._parse_time(feature.get("reset_after"))
+                            break
+            if recover_at is not None and now_dt < recover_at <= deadline:
+                recoverable_accounts += 1
+                recoverable_quota += quota_val
+
+        routable_accounts = max(0, uploadable - cooling_accounts)
+        routable_quota = max(0, total_quota - cooling_quota)
+        next_restore_at = ""
+        if restore_due:
+            next_restore_at = min(restore_due).isoformat()
         return {
             "total_quota": total_quota,
             "uploadable_accounts": uploadable,
             "excluded_accounts": excluded,
             "excluded_quota": excluded_quota,
+            "excluded_low_upload": excluded_low_upload,
+            "excluded_upload_429": excluded_upload_429,
             "cooling_accounts": cooling_accounts,
             "cooling_quota": cooling_quota,
-            "usable_accounts": max(0, uploadable - cooling_accounts),
-            "usable_quota": max(0, total_quota - cooling_quota),
+            "usable_accounts": routable_accounts,
+            "usable_quota": routable_quota,
+            "routable_accounts": routable_accounts,
+            "routable_quota": routable_quota,
+            "recoverable_24h_accounts": recoverable_accounts,
+            "recoverable_24h_quota": recoverable_quota,
+            "restore_24h_accounts": restore_24h_accounts,
+            "next_restore_at": next_restore_at,
             "cooling_ratio": round(cooling_accounts / uploadable, 4) if uploadable else 0.0,
             "reason_breakdown": reason_breakdown,
+            "min_upload_remaining": min_upload,
         }
 
     def _get_remote_info_cache(self, access_token: str) -> dict[str, Any] | None:
@@ -2212,54 +2262,180 @@ class AccountService:
             items.append(item)
         return items
 
+    _recent_call_cache: dict[int, tuple[float, dict[str, Any]]] = {}
+    _recent_call_cache_lock = Lock()
+
+    def recent_call_stats(self, minutes: int = 60) -> dict[str, Any]:
+        """最近 N 分钟生图调用的成功/失败计数（只扫日志尾部，结果缓存 30 秒）。
+
+        账号页每次刷新都会取统计，不能每次都解析整份日志（已轮转到数百 MB），
+        因此只读尾部 4MB；日志按时间顺序追加，尾部足以覆盖最近的窗口。
+        """
+        minutes = max(1, int(minutes or 60))
+        now = time.time()
+        with self._recent_call_cache_lock:
+            cached = self._recent_call_cache.get(minutes)
+            if cached and now - cached[0] < 30:
+                return dict(cached[1])
+        success = 0
+        failed = 0
+        try:
+            log_path = log_service.path
+            size = log_path.stat().st_size
+            back = min(size, 4 * 1024 * 1024)
+            with log_path.open("rb") as file:
+                if size > back:
+                    file.seek(size - back)
+                raw = file.read().decode("utf-8", errors="replace")
+            lines = [line for line in raw.splitlines() if '"type":"call"' in line]
+            if size > back and lines:
+                # 尾部起点所在行可能被截断，丢掉第一条
+                lines = lines[1:]
+            cutoff = (datetime.now() - timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+            for line in lines:
+                try:
+                    item = json.loads(line)
+                except Exception:
+                    continue
+                if str(item.get("time") or "") < cutoff:
+                    continue
+                summary = str(item.get("summary") or "")
+                if "完成" in summary:
+                    success += 1
+                elif "失败" in summary:
+                    failed += 1
+        except Exception:
+            pass
+        result = {"minutes": minutes, "success": success, "failed": failed}
+        with self._recent_call_cache_lock:
+            self._recent_call_cache[minutes] = (now, result)
+        return dict(result)
+
     def get_stats(self) -> dict:
+        """号池统计。
+
+        口径分三层，从宽到严，前端只应把 routable_* 当作“现在能跑多少”：
+          total_quota / nominal_quota  状态正常账号的 image_gen 合计（不含上传门槛）
+          uploadable_*                 再叠加 file_upload 余量与 429 标记过滤
+          routable_*                   再叠加速度冷却，与生图选号 needs_upload=True 同源
+        excluded_* 是“有生图额度但传不了图”的部分，用于解释名义额度与可接单量的差额。
+        """
         with self._lock:
-            items = list(self._accounts.values())
+            items = [dict(item) for item in self._accounts.values()]
         total = len(items)
         active = sum(1 for a in items if a.get("status") == "正常")
         limited = sum(1 for a in items if a.get("status") == "限流")
         abnormal = sum(1 for a in items if a.get("status") == "异常")
         disabled = sum(1 for a in items if a.get("status") == "禁用")
         unprobed = sum(1 for a in items if a.get("status") == "未探测")
-        total_quota = sum(max(0, int(a.get("quota") or 0)) for a in items if a.get("status") == "正常")
         total_success = sum(int(a.get("success") or 0) for a in items)
         total_fail = sum(int(a.get("fail") or 0) for a in items)
-        by_type = {}
+        by_type: dict[str, int] = {}
         for a in items:
-            t = a.get("type", "unknown")
-            by_type[t] = by_type.get(t, 0) + 1
-        cooling = 0
-        usable_cnt = 0
+            account_type = a.get("type", "unknown")
+            by_type[account_type] = by_type.get(account_type, 0) + 1
+
+        nominal_quota = sum(
+            max(0, int(a.get("quota") or 0)) for a in items if a.get("status") == "正常"
+        )
+        cooling_map = self.image_cooling_reasons()
+        now_dt = datetime.now(timezone.utc)
+        min_upload = config.image_upload_min_remaining
+        all_upload_remaining = 0
         upload_remaining = 0
-        upload_ready = 0
-        with self._cooldown_lock:
-            now_ts = time.time()
-            for a in items:
-                tok = a.get("access_token")
-                in_cool = bool(tok) and float(
-                    (self._image_cooldowns.get(tok) or {}).get("until") or 0) > now_ts
-                if in_cool:
-                    cooling += 1
-                # 实际可立即接单的账号：正常 + 有额度 + 不在冷却
-                q = int(a.get("quota") or 0)
-                st_ok = a.get("status") == "正常"
-                if st_ok and q > 0 and not in_cool:
-                    usable_cnt += 1
-                # 文件上传额度统计（上游 limits_progress 的 file_upload 剩余次数）
-                fu = None
-                lp = a.get("limits_progress")
-                if isinstance(lp, list):
-                    for it in lp:
-                        if isinstance(it, dict) and it.get("feature_name") == "file_upload":
-                            try:
-                                fu = max(0, int(it.get("remaining") or 0))
-                            except (TypeError, ValueError):
-                                fu = None
-                            break
-                if fu is not None:
-                    upload_remaining += fu
-                    if st_ok and q > 0 and not in_cool and fu > 0:
-                        upload_ready += 1
+        uploadable_accounts = 0
+        uploadable_quota = 0
+        routable_accounts = 0
+        routable_quota = 0
+        cooling_accounts = 0
+        cooling_quota = 0
+        excluded_low_upload = 0
+        excluded_upload_429 = 0
+        excluded_quota = 0
+        recoverable_24h_accounts = 0
+        recoverable_24h_quota = 0
+        restore_due: list[datetime] = []
+        restore_24h_accounts = 0
+        recoverable_deadline = now_dt + timedelta(hours=24)
+
+        for a in items:
+            account_upload = 0
+            limits = a.get("limits_progress")
+            if isinstance(limits, list):
+                for feature in limits:
+                    if isinstance(feature, dict) and feature.get("feature_name") == "file_upload":
+                        try:
+                            account_upload = max(0, int(feature.get("remaining") or 0))
+                        except (TypeError, ValueError):
+                            account_upload = 0
+                        break
+            # 全池余量：包含限流号。限流号 image_gen=0，这部分余量当前不可用，
+            # 只用于解释“为什么总余量很大却出不了图”。
+            all_upload_remaining += account_upload
+
+            status = str(a.get("status") or "")
+            quota = max(0, int(a.get("quota") or 0))
+            if status == "限流":
+                restore_at = self._parse_time(a.get("restore_at"))
+                if restore_at is not None and restore_at > now_dt:
+                    restore_due.append(restore_at)
+                    if restore_at <= recoverable_deadline:
+                        restore_24h_accounts += 1
+                continue
+            if not self._is_image_account_available(a):
+                continue
+
+            token = str(a.get("access_token") or "")
+            in_cooling = token in cooling_map
+            upload_reason = ""
+            upload_restore = self._parse_time(a.get("upload_restore_at"))
+            if upload_restore is not None and upload_restore > now_dt:
+                upload_reason = "upload_429"
+            elif min_upload > 0:
+                remaining = self._upload_remaining(a)
+                if remaining is not None and remaining < min_upload:
+                    upload_reason = "low_upload"
+            if upload_reason:
+                excluded_quota += quota
+                if upload_reason == "upload_429":
+                    excluded_upload_429 += 1
+                    # 429 标记的恢复点就是 upload_restore_at
+                    recover_at = upload_restore
+                else:
+                    excluded_low_upload += 1
+                    # 低余量账号要等 file_upload 计数窗口滚动，取该 feature 的 reset_after
+                    recover_at = None
+                    limits = a.get("limits_progress")
+                    if isinstance(limits, list):
+                        for feature in limits:
+                            if isinstance(feature, dict) and feature.get("feature_name") == "file_upload":
+                                recover_at = self._parse_time(feature.get("reset_after"))
+                                break
+                if recover_at is not None and now_dt < recover_at <= recoverable_deadline:
+                    recoverable_24h_accounts += 1
+                    recoverable_24h_quota += quota
+                continue
+
+            uploadable_accounts += 1
+            uploadable_quota += quota
+            upload_remaining += account_upload
+            if in_cooling:
+                cooling_accounts += 1
+                cooling_quota += quota
+                continue
+            routable_accounts += 1
+            routable_quota += quota
+
+        next_restore_at = ""
+        restore_accounts = 0
+        if restore_due:
+            first_restore = min(restore_due)
+            next_restore_at = first_restore.isoformat()
+            # 与最早恢复时间落在同一小时内的账号，视为“同一批”
+            restore_accounts = sum(
+                1 for item in restore_due if (item - first_restore).total_seconds() <= 3600
+            )
+
         return {
             "total": total,
             "cumulative_total": self._cumulative_total,
@@ -2268,13 +2444,41 @@ class AccountService:
             "abnormal": abnormal,
             "disabled": disabled,
             "unprobed": unprobed,
-            "cooling": cooling,
-            "usable_accounts": usable_cnt,
-            # 按每小时 5 张/号 的实测安全速率折算的小时供给能力
-            "usable_hourly": usable_cnt * 5,
+            # 名义额度：状态正常账号的 image_gen 合计，不含上传门槛
+            "total_quota": nominal_quota,
+            "nominal_quota": nominal_quota,
+            # 上传可用：图生图前置资源已满足
+            "uploadable_accounts": uploadable_accounts,
+            "uploadable_quota": uploadable_quota,
+            # upload_remaining 只含「生图可用」账号（状态正常 + 有额度）的上传余量；
+            # all_upload_remaining 含限流号，限流部分当前无法产出图片。
             "upload_remaining": upload_remaining,
-            "upload_ready_accounts": upload_ready,
-            "total_quota": total_quota,
+            "all_upload_remaining": all_upload_remaining,
+            "limited_upload_remaining": max(0, all_upload_remaining - upload_remaining),
+            # 可接单：再叠加速度冷却，与选号逻辑同源
+            "usable_accounts": routable_accounts,
+            "usable_quota": routable_quota,
+            "routable_accounts": routable_accounts,
+            "routable_quota": routable_quota,
+            "upload_ready_accounts": routable_accounts,
+            "usable_hourly": routable_accounts * 5,
+            "cooling": cooling_accounts,
+            "cooling_accounts": cooling_accounts,
+            "cooling_quota": cooling_quota,
+            # 诊断：为什么有额度却用不了
+            "excluded_accounts": excluded_low_upload + excluded_upload_429,
+            "excluded_quota": excluded_quota,
+            "excluded_low_upload": excluded_low_upload,
+            "excluded_upload_429": excluded_upload_429,
+            # 排除账号中 24 小时内可自动恢复的部分（含额度），用于预判明日产能
+            "recoverable_24h_accounts": recoverable_24h_accounts,
+            "recoverable_24h_quota": recoverable_24h_quota,
+            "min_upload_remaining": min_upload,
+            # 恢复预期：最早一批限流账号
+            "next_restore_at": next_restore_at,
+            "restore_accounts": restore_accounts,
+            # 限流号中 24 小时内回池的账号数（出图额度归零后按日重置）
+            "restore_24h_accounts": restore_24h_accounts,
             "total_success": total_success,
             "total_fail": total_fail,
             "by_type": by_type,
