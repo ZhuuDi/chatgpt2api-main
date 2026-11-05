@@ -20,10 +20,11 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     size = body.get("size")
     quality = str(body.get("quality") or "auto")
     response_format = str(body.get("response_format") or "b64_json")
-    # Images 2.6 动图参数：output_format=gif 时启用，帧数/时长仅 GIF 语义有效
-    output_format = str(body.get("output_format") or "").lower()
-    frame_count = clamp_frame_count(body.get("frame_count")) if output_format == "gif" else 0
-    frame_duration_ms = clamp_frame_duration(body.get("frame_duration_ms")) if output_format == "gif" else 0
+    # Images 2.6 动图参数：animation=true 或 output_format=gif 时启用，帧数/时长仅动图语义有效
+    is_animation = bool(body.get("animation")) or str(body.get("output_format") or "").lower() == "gif"
+    output_format = str(body.get("output_format") or "").lower() or ("gif" if is_animation else "")
+    frame_count = clamp_frame_count(body.get("frame_count")) if is_animation else 0
+    frame_duration_ms = clamp_frame_duration(body.get("frame_duration_ms")) if is_animation else 0
     base_url = str(body.get("base_url") or "") or None
     progress_callback = body.get("progress_callback")
     outputs = stream_image_outputs_with_pool(ConversationRequest(
@@ -33,6 +34,7 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         size=size,
         quality=quality,
         response_format=response_format,
+        animation=is_animation,
         output_format=output_format,
         frame_count=frame_count,
         frame_duration_ms=frame_duration_ms,

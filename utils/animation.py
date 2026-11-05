@@ -79,20 +79,24 @@ def image_dimensions(data: bytes) -> tuple[int, int]:
         return 0, 0
 
 
-def animation_param_prefix(frame_count: int, frame_duration_ms: int) -> str:
-    """构造帧数/帧时长参数前缀（固定放开头，用户提示词原文随后拼接）。
+def animation_prompt_prefix(frame_count: int = 0, frame_duration_ms: int = 0, intent: bool = True) -> str:
+    """构造动图提示词前缀（固定放开头，用户提示词原文随后拼接）。
 
-    措辞沿用实测精确执行的「帧数要求：N帧」句式；仅注入参数条款，
-    不包含 GIF 动图意图（那由调用方提示词自行表达）。
+    - intent=True：包含「GIF动图」要求——调用方传 animation=true 时由面板代为
+      表达动图意图，提示词无需再强调；
+    - 帧数/帧时长条款：上游没有参数接口，写进提示词是唯一控制通道
+      （帧数要求句式经实测可精确执行）。
     """
     parts: list[str] = []
+    if intent:
+        parts.append("GIF动图")
     if frame_count:
-        parts.append(f"帧数要求：{frame_count}帧")
+        parts.append(f"{frame_count}帧")
     if frame_duration_ms:
-        parts.append(f"每帧时长要求：{frame_duration_ms}毫秒")
+        parts.append(f"每帧{frame_duration_ms}毫秒")
     if not parts:
         return ""
-    return "【" + "，".join(parts) + "。】"
+    return "【制作要求：" + "，".join(parts) + "。】"
 
 
 def align_gif(data: bytes, frame_count: int = 0, frame_duration_ms: int = 0) -> bytes:

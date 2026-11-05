@@ -25,7 +25,7 @@ from services.openai_backend_api import (
 )
 from utils.animation import (
     align_gif,
-    animation_param_prefix,
+    animation_prompt_prefix,
     clamp_frame_count,
     clamp_frame_duration,
     image_dimensions,
@@ -267,12 +267,15 @@ def build_image_prompt(prompt: str, size: str | None, quality: str = "auto",
 
 
 def animation_settings(request: ConversationRequest) -> dict[str, int] | None:
-    """output_format=gif 时返回钳位后的动图参数（供提示词注入/结果过滤/Pillow 对齐），否则 None。
+    """动图开关：animation=true 或 output_format=gif 时返回动图参数（钳位后），否则 None。
 
-    注意：只注入帧数/帧时长参数条款（上游网页对话没有参数接口，提示词是唯一
-    控制通道）；GIF 动图意图本身不注入，由调用方在提示词中自然描述。
+    开启动图时面板代为注入「GIF动图」要求（调用方提示词无需再强调），
+    帧数/帧时长条款一并写入（上游没有参数接口，提示词是唯一控制通道），
+    下载后再用 Pillow 对齐到 API 合同值。
     """
-    if str(getattr(request, "output_format", "") or "").lower() != "gif":
+    wants = bool(getattr(request, "animation", False)) or \
+        str(getattr(request, "output_format", "") or "").lower() == "gif"
+    if not wants:
         return None
     return {
         "frame_count": clamp_frame_count(getattr(request, "frame_count", 0)),
@@ -283,9 +286,10 @@ def animation_settings(request: ConversationRequest) -> dict[str, int] | None:
 def animation_prefix_of(settings: dict[str, int] | None) -> str:
     if not settings:
         return ""
-    return animation_param_prefix(
+    return animation_prompt_prefix(
         settings.get("frame_count") or 0,
         settings.get("frame_duration_ms") or 0,
+        intent=True,
     )
 
 
@@ -399,7 +403,8 @@ class ConversationRequest:
     quality: str = "auto"
     response_format: str = "b64_json"
     base_url: str | None = None
-    output_format: str = ""        # 官方 2.6 语义：设为 "gif" 时输出动图（过滤静帧资产）
+    animation: bool = False        # 动图开关：true 时面板注入动图要求并只返回动图资产
+    output_format: str = ""        # 官方 2.6 语义：设为 "gif" 等价于 animation=true
     frame_count: int = 0           # 动画帧数（2-64），0=未指定
     frame_duration_ms: int = 0     # 每帧时长毫秒（20-2000，按 10ms 取整），0=未指定
     message_as_error: bool = False

@@ -106,7 +106,8 @@ const docs: ApiDoc[] = [
       ["size", "string", "可选，图片尺寸。"],
       ["quality", "string", "可选，默认 auto。"],
       ["response_format", "string", "可选，默认 b64_json。"],
-      ["output_format", "string", "可选，设为 gif 时仅返回动图资产（网页对话会额外产出分镜九宫格静帧，面板自动过滤）。"],
+      ["animation", "boolean", "可选，true=生成动图：面板自动注入动图要求，提示词无需再强调动画意图。"],
+      ["output_format", "string", "可选，设为 gif 等价于 animation=true；仅设 gif 时也建议提示词描述动作。"],
       ["frame_count", "number", "可选，动图帧数 2-64。面板会写入提示词（上游按帧数要求产出），生成后再强制精确对齐。"],
       ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms（按 10ms 取整）。面板写入提示词并在生成后精确重写播放速度。"],
     ],
@@ -121,7 +122,7 @@ const docs: ApiDoc[] = [
     example: (baseUrl: string, key: string) => `curl ${baseUrl}/images/generations \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${key}" \\
-  -d '{"model":"gpt-image-2.6-flare","prompt":"一只柯基在草地上奔跑的循环动图","output_format":"gif","frame_count":12,"frame_duration_ms":100}'`,
+  -d '{"model":"gpt-image-2.6-flare","prompt":"一只柯基在草地上奔跑","animation":true,"frame_count":12,"frame_duration_ms":100}'`,
   },
   {
     title: "图片编辑",
@@ -130,12 +131,13 @@ const docs: ApiDoc[] = [
     icon: FileArchive,
     input: [
       ["image", "file | file[] | URL", "参考图，支持 multipart 上传，也支持 JSON 图片链接。"],
-      ["prompt", "string", "编辑提示词。2.6 支持对输入图生成动图（官方 API 不支持，本面板独有）：请在提示词里描述想要的动作。"],
+      ["prompt", "string", "编辑提示词。"],
       ["model", "string", "可选，默认 gpt-image-2，支持 gpt-image-2.6 系列模型。"],
       ["n", "number", "可选，生成数量，当前限制 1-4。"],
       ["size", "string", "可选，图片尺寸。"],
       ["quality", "string", "可选，默认 auto。"],
-      ["output_format", "string", "可选，设为 gif 时仅返回动图资产。"],
+      ["animation", "boolean", "可选，true=对输入图生成动图编辑（官方 API 不支持，本面板独有），面板自动注入动图要求。"],
+      ["output_format", "string", "可选，设为 gif 等价于 animation=true。"],
       ["frame_count", "number", "可选，动图帧数 2-64。面板写入提示词并在生成后强制精确对齐。"],
       ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms。面板写入提示词并在生成后精确重写播放速度。"],
     ],

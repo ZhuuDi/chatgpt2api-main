@@ -75,8 +75,9 @@ def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
         "quality": _clean(fields.get("quality"), "auto"),
         "response_format": _clean(fields.get("response_format"), "b64_json"),
         "stream": _parse_bool(fields.get("stream")),
-        # Images 2.6 动图参数：表单里是字符串，统一钳位（仅 output_format=gif 时有效）
+        # Images 2.6 动图参数：表单里是字符串，统一钳位（animation 或 output_format=gif 时有效）
         "output_format": output_format,
+        "animation": _parse_bool(fields.get("animation")),
         "frame_count": clamp_frame_count(fields.get("frame_count")),
         "frame_duration_ms": clamp_frame_duration(fields.get("frame_duration_ms")),
     }
