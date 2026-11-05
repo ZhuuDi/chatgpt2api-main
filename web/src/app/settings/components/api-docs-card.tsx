@@ -101,21 +101,27 @@ const docs: ApiDoc[] = [
     icon: FileArchive,
     input: [
       ["prompt", "string", "图片生成提示词。"],
-      ["model", "string", "可选，默认 gpt-image-2。"],
+      ["model", "string", "可选，默认 gpt-image-2，支持 gpt-image-2.6-flare（快速）与 gpt-image-2.6-sunburst（高质量）。"],
       ["n", "number", "可选，生成数量，当前限制 1-4。"],
       ["size", "string", "可选，图片尺寸。"],
       ["quality", "string", "可选，默认 auto。"],
       ["response_format", "string", "可选，默认 b64_json。"],
+      ["output_format", "string", "可选，设为 gif 生成动图（Images 2.6 动图能力）。"],
+      ["frame_count", "number", "可选，动图帧数 2-64，默认 9；仅 output_format=gif 时生效。"],
+      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms（按 10ms 取整），默认 200；仅 output_format=gif 时生效。"],
     ],
     output: [
       ["data", "array", "图片结果列表。"],
       ["data[].b64_json", "string", "base64 图片内容。"],
       ["data[].url", "string", "部分配置下返回图片 URL。"],
+      ["data[].format", "string", "实际格式（gif/png/jpeg/webp），按内容嗅探。"],
+      ["data[].is_animation", "boolean", "是否为动图。"],
+      ["data[].width / height", "number", "图片尺寸。"],
     ],
     example: (baseUrl: string, key: string) => `curl ${baseUrl}/images/generations \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${key}" \\
-  -d '{"model":"gpt-image-2","prompt":"一张极简产品海报","n":1}'`,
+  -d '{"model":"gpt-image-2.6-flare","prompt":"一只柯基在草地上奔跑","output_format":"gif","frame_count":12,"frame_duration_ms":100}'`,
   },
   {
     title: "图片编辑",
@@ -125,19 +131,25 @@ const docs: ApiDoc[] = [
     input: [
       ["image", "file | file[] | URL", "参考图，支持 multipart 上传，也支持 JSON 图片链接。"],
       ["prompt", "string", "编辑提示词。"],
-      ["model", "string", "可选，默认 gpt-image-2。"],
+      ["model", "string", "可选，默认 gpt-image-2，支持 gpt-image-2.6 系列模型。"],
       ["n", "number", "可选，生成数量，当前限制 1-4。"],
       ["size", "string", "可选，图片尺寸。"],
       ["quality", "string", "可选，默认 auto。"],
+      ["output_format", "string", "可选，设为 gif 可对输入图生成动图编辑（官方 API 不支持，本面板独有）。"],
+      ["frame_count", "number", "可选，动图帧数 2-64；仅 output_format=gif 时生效。"],
+      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms；仅 output_format=gif 时生效。"],
     ],
     output: [
       ["data", "array", "编辑后的图片结果列表。"],
       ["data[].b64_json", "string", "base64 图片内容。"],
       ["data[].url", "string", "部分配置下返回图片 URL。"],
+      ["data[].format", "string", "实际格式（gif/png/jpeg/webp），按内容嗅探。"],
+      ["data[].is_animation", "boolean", "是否为动图。"],
+      ["data[].width / height", "number", "图片尺寸。"],
     ],
     example: (baseUrl: string, key: string) => `curl ${baseUrl}/images/edits \\
   -H "Authorization: Bearer ${key}" \\
-  -F "model=gpt-image-2" \\
+  -F "model=gpt-image-2.6-flare" \\
   -F "prompt=改成赛博朋克夜景" \\
   -F "image=@./input.png"`,
   },
@@ -215,7 +227,7 @@ const docs: ApiDoc[] = [
   },
 ];
 
-const usableModels = ["gpt-image-2", "codex-gpt-image-2", "auto", "gpt-5", "gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini"];
+const usableModels = ["gpt-image-2", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst", "codex-gpt-image-2", "auto", "gpt-5", "gpt-5-1", "gpt-5-2", "gpt-5-3", "gpt-5-3-mini", "gpt-5-mini"];
 
 function ParamTable({ rows }: { rows: ParamRow[] }) {
   return (
