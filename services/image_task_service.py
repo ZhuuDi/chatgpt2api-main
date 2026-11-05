@@ -208,6 +208,9 @@ class ImageTaskService:
         model: str,
         size: str | None,
         quality: str = "auto",
+        output_format: str | None = None,
+        frame_count: int | None = None,
+        frame_duration_ms: int | None = None,
         base_url: str = "",
     ) -> dict[str, Any]:
         payload = {
@@ -217,6 +220,9 @@ class ImageTaskService:
             "size": size,
             "quality": quality,
             "response_format": "url",
+            "output_format": output_format,
+            "frame_count": frame_count,
+            "frame_duration_ms": frame_duration_ms,
             "base_url": base_url,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="generate", payload=payload)
@@ -230,6 +236,9 @@ class ImageTaskService:
         model: str,
         size: str | None,
         quality: str = "auto",
+        output_format: str | None = None,
+        frame_count: int | None = None,
+        frame_duration_ms: int | None = None,
         base_url: str = "",
         images: list[tuple[bytes, str, str]] | None = None,
         masks: list[tuple[bytes, str, str]] | None = None,
@@ -243,6 +252,9 @@ class ImageTaskService:
             "size": size,
             "quality": quality,
             "response_format": "url",
+            "output_format": output_format,
+            "frame_count": frame_count,
+            "frame_duration_ms": frame_duration_ms,
             "base_url": base_url,
         }
         return self._submit(identity, client_task_id=client_task_id, mode="edit", payload=payload)

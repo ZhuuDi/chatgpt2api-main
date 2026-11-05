@@ -15,6 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from services.proxy_service import proxy_settings
+from utils.animation import clamp_frame_count, clamp_frame_duration
 
 ImageInput = tuple[bytes, str, str]
 ImageSource = str | UploadFile | ImageInput
@@ -65,6 +66,7 @@ def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
     prompt = _clean(fields.get("prompt"))
     if not prompt:
         raise HTTPException(status_code=400, detail={"error": "prompt is required"})
+    output_format = _clean(fields.get("output_format")).lower() or None
     payload = {
         "prompt": prompt,
         "model": _clean(fields.get("model"), "gpt-image-2"),
@@ -73,6 +75,10 @@ def _payload_from_fields(fields: dict[str, Any]) -> dict[str, Any]:
         "quality": _clean(fields.get("quality"), "auto"),
         "response_format": _clean(fields.get("response_format"), "b64_json"),
         "stream": _parse_bool(fields.get("stream")),
+        # Images 2.6 动图参数：表单里是字符串，统一钳位（仅 output_format=gif 时有效）
+        "output_format": output_format,
+        "frame_count": clamp_frame_count(fields.get("frame_count")),
+        "frame_duration_ms": clamp_frame_duration(fields.get("frame_duration_ms")),
     }
     if "client_task_id" in fields:
         payload["client_task_id"] = _clean(fields.get("client_task_id"))

@@ -20,6 +20,10 @@ class ImageGenerationTaskRequest(BaseModel):
     model: str = "gpt-image-2"
     size: str | None = None
     quality: str = "auto"
+    # Images 2.6 动图参数：output_format=gif 时生效（范围镜像官方 API）
+    output_format: str | None = None
+    frame_count: int | None = Field(default=None, ge=2, le=64)
+    frame_duration_ms: int | None = Field(default=None, ge=20, le=2000)
 
 
 class ResumePollRequest(BaseModel):
@@ -98,6 +102,9 @@ def create_router() -> APIRouter:
                 model=body.model,
                 size=body.size,
                 quality=body.quality,
+                output_format=body.output_format,
+                frame_count=body.frame_count,
+                frame_duration_ms=body.frame_duration_ms,
                 base_url=resolve_image_base_url(request),
             )
         except ValueError as exc:
@@ -127,6 +134,9 @@ def create_router() -> APIRouter:
                 model=model,
                 size=payload["size"],
                 quality=payload["quality"],
+                output_format=payload.get("output_format"),
+                frame_count=payload.get("frame_count"),
+                frame_duration_ms=payload.get("frame_duration_ms"),
                 base_url=resolve_image_base_url(request),
                 images=images,
                 masks=masks,

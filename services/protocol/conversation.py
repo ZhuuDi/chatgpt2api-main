@@ -23,6 +23,15 @@ from services.openai_backend_api import (
     OpenAIBackendAPI,
     is_image_edit_refusal,
 )
+from utils.animation import (
+    align_gif,
+    animation_prompt_prefix,
+    clamp_frame_count,
+    clamp_frame_duration,
+    image_dimensions,
+    is_animated_gif,
+    sniff_image_format,
+)
 from utils.helper import (
     IMAGE_MODELS,
     extract_image_from_message_content,
@@ -244,13 +253,37 @@ def assistant_history_messages(messages: list[dict[str, Any]]) -> list[str]:
     return [str(item.get("content") or "") for item in messages if item.get("role") == "assistant" and item.get("content")]
 
 
-def build_image_prompt(prompt: str, size: str | None, quality: str = "auto") -> str:
+def build_image_prompt(prompt: str, size: str | None, quality: str = "auto",
+                       animation_prefix: str = "") -> str:
+    # 动图参数前缀固定放开头（用户偏好），prompt 原文随后；尺寸/质量提示保持原有尾部追加
+    head = f"{animation_prefix}\n" if animation_prefix else ""
     hints = []
     if size:
         hints.append(f"输出图片尺寸为 {size}。")
     if quality:
         hints.append(f"输出图片质量为 {quality}。")
-    return f"{prompt.strip()}\n\n{''.join(hints)}" if hints else prompt
+    body = f"{prompt.strip()}\n\n{''.join(hints)}" if hints else prompt.strip()
+    return f"{head}{body}"
+
+
+def animation_settings(request: ConversationRequest) -> dict[str, int] | None:
+    """output_format=gif 时返回钳位后的动图参数，否则 None（不注入/不后处理）。"""
+    if str(getattr(request, "output_format", "") or "").lower() != "gif":
+        return None
+    return {
+        "frame_count": clamp_frame_count(getattr(request, "frame_count", 0)),
+        "frame_duration_ms": clamp_frame_duration(getattr(request, "frame_duration_ms", 0)),
+    }
+
+
+def animation_prefix_of(settings: dict[str, int] | None) -> str:
+    if not settings:
+        return ""
+    return animation_prompt_prefix(
+        "gif",
+        settings.get("frame_count") or 0,
+        settings.get("frame_duration_ms") or 0,
+    )
 
 
 def encoding_for_model(model: str):
@@ -299,24 +332,52 @@ def format_image_result(
     base_url: str | None = None,
     created: int | None = None,
     message: str = "",
+    animation: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     data: list[dict[str, Any]] = []
+    processed: list[dict[str, Any]] = []
     for item in items:
         b64_json = str(item.get("b64_json") or "").strip()
         if not b64_json:
             continue
         revised_prompt = str(item.get("revised_prompt") or prompt).strip() or prompt
+        raw = base64.b64decode(b64_json)
+        fmt = sniff_image_format(raw)
+        animated = is_animated_gif(raw)
+        # 动图参数对齐：仅处理上游返回的 GIF 动图（抽帧/循环补帧/重写帧时长）
+        if animation and animated:
+            raw = align_gif(
+                raw,
+                int(animation.get("frame_count") or 0),
+                int(animation.get("frame_duration_ms") or 0),
+            )
+        processed.append({
+            "raw": raw,
+            "format": fmt,
+            "is_animation": animated,
+            "revised_prompt": revised_prompt,
+        })
+
+    if animation:
+        # 官方 2.6 语义：请求 GIF 时只返回动图资产（网页对话会额外产出九宫格分镜静帧）
+        animated_items = [p for p in processed if p["format"] == "gif" and p["is_animation"]]
+        if animated_items:
+            processed = animated_items
+
+    for p in processed:
+        width, height = image_dimensions(p["raw"])
+        entry: dict[str, Any] = {
+            "format": p["format"],
+            "is_animation": p["is_animation"],
+        }
+        if width:
+            entry["width"] = width
+            entry["height"] = height
         if response_format == "b64_json":
-            data.append({
-                "b64_json": b64_json,
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
-                "revised_prompt": revised_prompt,
-            })
-        else:
-            data.append({
-                "url": save_image_bytes(base64.b64decode(b64_json), base_url),
-                "revised_prompt": revised_prompt,
-            })
+            entry["b64_json"] = base64.b64encode(p["raw"]).decode("ascii")
+        entry["url"] = save_image_bytes(p["raw"], base_url)
+        entry["revised_prompt"] = p["revised_prompt"]
+        data.append(entry)
     result: dict[str, Any] = {"created": created or int(time.time()), "data": data}
     if message and not data:
         result["message"] = message
@@ -335,6 +396,9 @@ class ConversationRequest:
     quality: str = "auto"
     response_format: str = "b64_json"
     base_url: str | None = None
+    output_format: str = ""        # 官方 2.6 语义：设为 "gif" 时输出动图（过滤静帧资产）
+    frame_count: int = 0           # 动画帧数（2-64），0=未指定
+    frame_duration_ms: int = 0     # 每帧时长毫秒（20-2000，按 10ms 取整），0=未指定
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
     deadline: float | None = None  # time.monotonic() 单请求总预算截止时间（SSE+轮询+下载共享）
@@ -723,13 +787,15 @@ def conversation_events(
     thinking_effort: str = "",
     deadline: float | None = None,
     prompt_suffix: str = "",
+    animation_prefix: str = "",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
     if image_model:
-        final_prompt = prompt_with_global_system(build_image_prompt(prompt, size, quality))
+        final_prompt = prompt_with_global_system(
+            build_image_prompt(prompt, size, quality, animation_prefix=animation_prefix))
         if prompt_suffix:
             final_prompt = f"{final_prompt}\n\n{prompt_suffix}"
     else:
@@ -901,6 +967,8 @@ def stream_image_outputs(
         index: int = 1,
         total: int = 1,
 ) -> Iterator[ImageOutput]:
+    animation = animation_settings(request)
+    animation_prefix = animation_prefix_of(animation)
     last: dict[str, Any] = {}
     for event in conversation_events(
             backend,
@@ -911,6 +979,7 @@ def stream_image_outputs(
             quality=request.quality,
             deadline=request.deadline,
             prompt_suffix=request.retry_prompt_suffix or "",
+            animation_prefix=animation_prefix,
     ):
         last = event
         if event.get("type") == "conversation.delta":
@@ -1086,6 +1155,7 @@ def stream_image_outputs(
             request.response_format,
             request.base_url,
             int(time.time()),
+            animation=animation,
         )["data"]
         if data:
             yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
@@ -1191,6 +1261,7 @@ def stream_image_outputs(
                         request.response_format,
                         request.base_url,
                         int(time.time()),
+                        animation=animation,
                     )["data"]
                     if data:
                         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
@@ -1312,6 +1383,7 @@ def stream_image_outputs(
                     request.response_format,
                     request.base_url,
                     int(time.time()),
+                    animation=animation,
                 )["data"]
                 if data:
                     yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data, conversation_id=conversation_id)
@@ -1372,6 +1444,7 @@ def stream_codex_image_outputs(
         request.response_format,
         request.base_url,
         int(time.time()),
+        animation=animation_settings(request),
     )["data"]
     if data:
         yield ImageOutput(kind="result", model=request.model, index=index, total=total, data=data)

@@ -18,7 +18,7 @@ from services.config import DATA_DIR, config
 
 IMAGE_INDEX_FILE = DATA_DIR / "image_index.json"
 IMAGE_INDEX_LOCK = Lock()
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
 class ImageStorageError(RuntimeError):
@@ -57,6 +57,19 @@ def _image_dimensions(payload: bytes) -> tuple[int, int] | None:
             return image.size
     except Exception:
         return None
+
+
+def _sniff_extension(payload: bytes) -> str:
+    """按魔数识别存储扩展名（GIF 动图、JPEG 等不再一律 .png）。"""
+    if payload.startswith((b"GIF89a", b"GIF87a")):
+        return ".gif"
+    if payload.startswith(b"\xff\xd8"):
+        return ".jpg"
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return ".webp"
+    return ".png"
 
 
 def _is_image_rel(path: str) -> bool:
@@ -254,7 +267,9 @@ class ImageStorageService:
 
     def make_relative_path(self, image_data: bytes) -> str:
         file_hash = hashlib.md5(image_data).hexdigest()
-        filename = f"{int(time.time())}_{file_hash}.png"
+        # 按魔数定扩展名：上游动图产出是 GIF，写死 .png 会让按扩展名处理的客户端误判
+        ext = _sniff_extension(image_data)
+        filename = f"{int(time.time())}_{file_hash}{ext}"
         relative_dir = Path(time.strftime("%Y"), time.strftime("%m"), time.strftime("%d"))
         return f"{relative_dir.as_posix()}/{filename}"
 

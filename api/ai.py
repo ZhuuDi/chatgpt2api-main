@@ -28,6 +28,10 @@ class ImageGenerationRequest(BaseModel):
     size: str | None = None
     quality: str = "auto"
     response_format: str = "b64_json"
+    # Images 2.6 动图参数：output_format=gif 时生效（范围镜像官方 API）
+    output_format: str | None = None
+    frame_count: int | None = Field(default=None, ge=2, le=64)
+    frame_duration_ms: int | None = Field(default=None, ge=20, le=2000)
     history_disabled: bool = True
     stream: bool | None = None
 

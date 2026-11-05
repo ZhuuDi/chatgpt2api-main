@@ -14,6 +14,7 @@ from services.protocol.conversation import (
     stream_image_chunks,
     stream_image_outputs_with_pool,
 )
+from utils.animation import clamp_frame_count, clamp_frame_duration
 from utils.image_tokens import count_image_inputs_tokens, count_image_output_items_tokens, image_usage
 
 
@@ -58,6 +59,10 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
     size = body.get("size")
     quality = str(body.get("quality") or "auto")
     response_format = str(body.get("response_format") or "b64_json")
+    # Images 2.6 动图参数（官方 Image API 的 edits 端点不支持 GIF，但网页对话链路实测可用）
+    output_format = str(body.get("output_format") or "").lower()
+    frame_count = clamp_frame_count(body.get("frame_count")) if output_format == "gif" else 0
+    frame_duration_ms = clamp_frame_duration(body.get("frame_duration_ms")) if output_format == "gif" else 0
     base_url = str(body.get("base_url") or "") or None
     progress_callback = body.get("progress_callback")
     encoded_images = encode_images(images)
@@ -70,6 +75,9 @@ def handle(body: dict[str, Any]) -> dict[str, Any] | Iterator[dict[str, Any]]:
         size=size,
         quality=quality,
         response_format=response_format,
+        output_format=output_format,
+        frame_count=frame_count,
+        frame_duration_ms=frame_duration_ms,
         base_url=base_url,
         images=encoded_images,
         message_as_error=True,
