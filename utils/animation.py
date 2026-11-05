@@ -48,19 +48,24 @@ def animation_settings_from_prompt(prompt: str) -> dict[str, int] | None:
 
 
 def clamp_frame_count(value: object) -> int:
+    """钳位到 2-64；0/非法值表示未指定，保持 0（不参与前缀与对齐）。"""
     try:
         n = int(value)
     except (TypeError, ValueError):
+        return 0
+    if n <= 0:
         return 0
     return max(FRAME_COUNT_MIN, min(FRAME_COUNT_MAX, n))
 
 
 def clamp_frame_duration(value: object) -> int:
+    """钳位到 20-2000ms（按 10ms 取整）；0/非法值表示未指定，保持 0。"""
     try:
         ms = int(value)
     except (TypeError, ValueError):
         return 0
-    # 官方语义：按 10ms 取整
+    if ms <= 0:
+        return 0
     ms = max(FRAME_DURATION_MIN, min(FRAME_DURATION_MAX, ms))
     return (ms // 10) * 10
 
