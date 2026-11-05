@@ -100,7 +100,7 @@ const docs: ApiDoc[] = [
     path: "/v1/images/generations",
     icon: FileArchive,
     input: [
-      ["prompt", "string", "图片生成提示词。2.6 支持动图：需要动画时请在提示词里自然描述动作（如“一只柯基奔跑的循环动图”“让它眨眼、挥手”）。"],
+      ["prompt", "string", "图片生成提示词。2.6 支持动图：推荐传 animation=true；经 new-api 等网关调用时，也可在提示词开头写标准前缀【制作要求：GIF动图，12帧，每帧100毫秒。】（帧数/时长可省略）。"],
       ["model", "string", "可选，默认 gpt-image-2，支持 gpt-image-2.6-flare（快速）与 gpt-image-2.6-sunburst（高质量）。"],
       ["n", "number", "可选，生成数量，当前限制 1-4。"],
       ["size", "string", "可选，图片尺寸。"],

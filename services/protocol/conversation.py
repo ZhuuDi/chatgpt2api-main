@@ -26,6 +26,7 @@ from services.openai_backend_api import (
 from utils.animation import (
     align_gif,
     animation_prompt_prefix,
+    animation_settings_from_prompt,
     clamp_frame_count,
     clamp_frame_duration,
     image_dimensions,
@@ -267,20 +268,23 @@ def build_image_prompt(prompt: str, size: str | None, quality: str = "auto",
 
 
 def animation_settings(request: ConversationRequest) -> dict[str, int] | None:
-    """动图开关：animation=true 或 output_format=gif 时返回动图参数（钳位后），否则 None。
+    """动图开关与参数解析（优先级：body 参数 > 提示词标准前缀 > 无）。
 
-    开启动图时面板代为注入「GIF动图」要求（调用方提示词无需再强调），
-    帧数/帧时长条款一并写入（上游没有参数接口，提示词是唯一控制通道），
-    下载后再用 Pillow 对齐到 API 合同值。
+    - body：animation=true / output_format=gif 开启动图，帧参数直接生效；
+    - 提示词协议：识别【制作要求：GIF动图…。】前缀（前置 shim 注入或调用方
+      手写均可）——这是经 new-api 等网关调用时的标准方式，网关会剥离
+      自定义 body 字段，但提示词能完整穿透。
+    返回动图参数（帧数/时长可为 0 的未指定态），用于结果过滤与 Pillow 对齐；
+    未开启动图返回 None。
     """
-    wants = bool(getattr(request, "animation", False)) or \
+    explicit = bool(getattr(request, "animation", False)) or \
         str(getattr(request, "output_format", "") or "").lower() == "gif"
-    if not wants:
-        return None
-    return {
-        "frame_count": clamp_frame_count(getattr(request, "frame_count", 0)),
-        "frame_duration_ms": clamp_frame_duration(getattr(request, "frame_duration_ms", 0)),
-    }
+    if explicit:
+        return {
+            "frame_count": clamp_frame_count(getattr(request, "frame_count", 0)),
+            "frame_duration_ms": clamp_frame_duration(getattr(request, "frame_duration_ms", 0)),
+        }
+    return animation_settings_from_prompt(getattr(request, "prompt", ""))
 
 
 def animation_prefix_of(settings: dict[str, int] | None) -> str:
