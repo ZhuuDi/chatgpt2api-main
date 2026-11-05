@@ -2,12 +2,14 @@
 """animation.py — Images 2.6 GIF 动图参数支持
 
 设计约定（2026-11-05 与需求方确认）：
-- 2.6 是完整图像模型，动图只是能力之一；面板**不注入**任何制作要求前缀，
-  动图意图由调用方在提示词中自然描述（如"让它眨眼、挥手""生成循环动图"）。
+- 2.6 是完整图像模型，动图意图由调用方在提示词中自然描述，面板**不注入**
+  "GIF动图"这类制作要求（避免与用户意图冲突）；
+- 帧数/帧时长参数：上游网页对话没有参数接口，提示词是唯一控制通道，因此
+  这两个参数**会注入提示词**（帧数要求句式经实测上游精确执行）；
+- 注入只影响概率，不构成合同：下载后用 Pillow 无损对齐——帧数不符时
+  均匀抽帧/循环补帧，时长不符时重写每帧时长（等效调播放速度）；
 - output_format=gif 的作用：过滤结果只保留动图资产（网页对话会额外产出
   分镜九宫格静帧）。
-- frame_count / frame_duration_ms 的作用：下载后用 Pillow 无损对齐——
-  帧数不符时均匀抽帧/循环补帧，时长不符时重写每帧时长（等效调播放速度）。
 
 参数范围镜像官方 Images API：frame_count 2-64（默认 9），
 frame_duration_ms 20-2000（默认 200，按 10ms 取整）。
@@ -75,6 +77,22 @@ def image_dimensions(data: bytes) -> tuple[int, int]:
             return int(im.width), int(im.height)
     except Exception:
         return 0, 0
+
+
+def animation_param_prefix(frame_count: int, frame_duration_ms: int) -> str:
+    """构造帧数/帧时长参数前缀（固定放开头，用户提示词原文随后拼接）。
+
+    措辞沿用实测精确执行的「帧数要求：N帧」句式；仅注入参数条款，
+    不包含 GIF 动图意图（那由调用方提示词自行表达）。
+    """
+    parts: list[str] = []
+    if frame_count:
+        parts.append(f"帧数要求：{frame_count}帧")
+    if frame_duration_ms:
+        parts.append(f"每帧时长要求：{frame_duration_ms}毫秒")
+    if not parts:
+        return ""
+    return "【" + "，".join(parts) + "。】"
 
 
 def align_gif(data: bytes, frame_count: int = 0, frame_duration_ms: int = 0) -> bytes:

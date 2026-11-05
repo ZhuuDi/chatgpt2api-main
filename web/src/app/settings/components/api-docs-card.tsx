@@ -107,8 +107,8 @@ const docs: ApiDoc[] = [
       ["quality", "string", "可选，默认 auto。"],
       ["response_format", "string", "可选，默认 b64_json。"],
       ["output_format", "string", "可选，设为 gif 时仅返回动图资产（网页对话会额外产出分镜九宫格静帧，面板自动过滤）。"],
-      ["frame_count", "number", "可选，动图帧数 2-64：生成后强制对齐（不足循环补帧、超出均匀抽帧）。也建议直接在提示词里写明帧数。"],
-      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms（按 10ms 取整）：生成后精确重写播放速度。"],
+      ["frame_count", "number", "可选，动图帧数 2-64。面板会写入提示词（上游按帧数要求产出），生成后再强制精确对齐。"],
+      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms（按 10ms 取整）。面板写入提示词并在生成后精确重写播放速度。"],
     ],
     output: [
       ["data", "array", "图片结果列表。"],
@@ -136,8 +136,8 @@ const docs: ApiDoc[] = [
       ["size", "string", "可选，图片尺寸。"],
       ["quality", "string", "可选，默认 auto。"],
       ["output_format", "string", "可选，设为 gif 时仅返回动图资产。"],
-      ["frame_count", "number", "可选，动图帧数 2-64：生成后强制对齐；也建议在提示词里写明帧数。"],
-      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms：生成后精确重写播放速度。"],
+      ["frame_count", "number", "可选，动图帧数 2-64。面板写入提示词并在生成后强制精确对齐。"],
+      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms。面板写入提示词并在生成后精确重写播放速度。"],
     ],
     output: [
       ["data", "array", "编辑后的图片结果列表。"],
