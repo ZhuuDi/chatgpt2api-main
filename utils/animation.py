@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """animation.py — Images 2.6 GIF 动图参数支持
 
-网页反代链路的动图参数分两层实现：
-1. prompt 前缀（【制作要求：GIF动图，N帧，每帧D毫秒。】）：影响上游产出，
-   实证上游会照办帧数要求；
-2. Pillow 后处理：保证 API 合同精确——帧数不符时均匀抽帧/循环补帧，
-   时长不符时无损重写每帧时长（等效调播放速度）。
+设计约定（2026-11-05 与需求方确认）：
+- 2.6 是完整图像模型，动图只是能力之一；面板**不注入**任何制作要求前缀，
+  动图意图由调用方在提示词中自然描述（如"让它眨眼、挥手""生成循环动图"）。
+- output_format=gif 的作用：过滤结果只保留动图资产（网页对话会额外产出
+  分镜九宫格静帧）。
+- frame_count / frame_duration_ms 的作用：下载后用 Pillow 无损对齐——
+  帧数不符时均匀抽帧/循环补帧，时长不符时重写每帧时长（等效调播放速度）。
 
 参数范围镜像官方 Images API：frame_count 2-64（默认 9），
 frame_duration_ms 20-2000（默认 200，按 10ms 取整）。
@@ -73,23 +75,6 @@ def image_dimensions(data: bytes) -> tuple[int, int]:
             return int(im.width), int(im.height)
     except Exception:
         return 0, 0
-
-
-def animation_prompt_prefix(output_format: str, frame_count: int, frame_duration_ms: int) -> str:
-    """构造固定前缀提示词（用户提示词原文随后拼接）。
-
-    实证措辞：全角标点 + 「N帧」「每帧D毫秒」句式上游可精确执行。
-    """
-    if str(output_format or "").lower() != "gif":
-        return ""
-    parts: list[str] = []
-    if frame_count:
-        parts.append(f"{frame_count}帧")
-    if frame_duration_ms:
-        parts.append(f"每帧{frame_duration_ms}毫秒")
-    if parts:
-        return "【制作要求：GIF动图，{}。】".format("，".join(parts))
-    return "【制作要求：GIF动图。】"
 
 
 def align_gif(data: bytes, frame_count: int = 0, frame_duration_ms: int = 0) -> bytes:

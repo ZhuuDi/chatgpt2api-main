@@ -100,15 +100,15 @@ const docs: ApiDoc[] = [
     path: "/v1/images/generations",
     icon: FileArchive,
     input: [
-      ["prompt", "string", "图片生成提示词。"],
+      ["prompt", "string", "图片生成提示词。2.6 支持动图：需要动画时请在提示词里自然描述动作（如“一只柯基奔跑的循环动图”“让它眨眼、挥手”）。"],
       ["model", "string", "可选，默认 gpt-image-2，支持 gpt-image-2.6-flare（快速）与 gpt-image-2.6-sunburst（高质量）。"],
       ["n", "number", "可选，生成数量，当前限制 1-4。"],
       ["size", "string", "可选，图片尺寸。"],
       ["quality", "string", "可选，默认 auto。"],
       ["response_format", "string", "可选，默认 b64_json。"],
-      ["output_format", "string", "可选，设为 gif 生成动图（Images 2.6 动图能力）。"],
-      ["frame_count", "number", "可选，动图帧数 2-64，默认 9；仅 output_format=gif 时生效。"],
-      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms（按 10ms 取整），默认 200；仅 output_format=gif 时生效。"],
+      ["output_format", "string", "可选，设为 gif 时仅返回动图资产（网页对话会额外产出分镜九宫格静帧，面板自动过滤）。"],
+      ["frame_count", "number", "可选，动图帧数 2-64：生成后强制对齐（不足循环补帧、超出均匀抽帧）。也建议直接在提示词里写明帧数。"],
+      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms（按 10ms 取整）：生成后精确重写播放速度。"],
     ],
     output: [
       ["data", "array", "图片结果列表。"],
@@ -121,7 +121,7 @@ const docs: ApiDoc[] = [
     example: (baseUrl: string, key: string) => `curl ${baseUrl}/images/generations \\
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${key}" \\
-  -d '{"model":"gpt-image-2.6-flare","prompt":"一只柯基在草地上奔跑","output_format":"gif","frame_count":12,"frame_duration_ms":100}'`,
+  -d '{"model":"gpt-image-2.6-flare","prompt":"一只柯基在草地上奔跑的循环动图","output_format":"gif","frame_count":12,"frame_duration_ms":100}'`,
   },
   {
     title: "图片编辑",
@@ -130,14 +130,14 @@ const docs: ApiDoc[] = [
     icon: FileArchive,
     input: [
       ["image", "file | file[] | URL", "参考图，支持 multipart 上传，也支持 JSON 图片链接。"],
-      ["prompt", "string", "编辑提示词。"],
+      ["prompt", "string", "编辑提示词。2.6 支持对输入图生成动图（官方 API 不支持，本面板独有）：请在提示词里描述想要的动作。"],
       ["model", "string", "可选，默认 gpt-image-2，支持 gpt-image-2.6 系列模型。"],
       ["n", "number", "可选，生成数量，当前限制 1-4。"],
       ["size", "string", "可选，图片尺寸。"],
       ["quality", "string", "可选，默认 auto。"],
-      ["output_format", "string", "可选，设为 gif 可对输入图生成动图编辑（官方 API 不支持，本面板独有）。"],
-      ["frame_count", "number", "可选，动图帧数 2-64；仅 output_format=gif 时生效。"],
-      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms；仅 output_format=gif 时生效。"],
+      ["output_format", "string", "可选，设为 gif 时仅返回动图资产。"],
+      ["frame_count", "number", "可选，动图帧数 2-64：生成后强制对齐；也建议在提示词里写明帧数。"],
+      ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms：生成后精确重写播放速度。"],
     ],
     output: [
       ["data", "array", "编辑后的图片结果列表。"],

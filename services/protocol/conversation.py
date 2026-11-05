@@ -25,7 +25,6 @@ from services.openai_backend_api import (
 )
 from utils.animation import (
     align_gif,
-    animation_prompt_prefix,
     clamp_frame_count,
     clamp_frame_duration,
     image_dimensions,
@@ -253,37 +252,26 @@ def assistant_history_messages(messages: list[dict[str, Any]]) -> list[str]:
     return [str(item.get("content") or "") for item in messages if item.get("role") == "assistant" and item.get("content")]
 
 
-def build_image_prompt(prompt: str, size: str | None, quality: str = "auto",
-                       animation_prefix: str = "") -> str:
-    # 动图参数前缀固定放开头（用户偏好），prompt 原文随后；尺寸/质量提示保持原有尾部追加
-    head = f"{animation_prefix}\n" if animation_prefix else ""
+def build_image_prompt(prompt: str, size: str | None, quality: str = "auto") -> str:
     hints = []
     if size:
         hints.append(f"输出图片尺寸为 {size}。")
     if quality:
         hints.append(f"输出图片质量为 {quality}。")
-    body = f"{prompt.strip()}\n\n{''.join(hints)}" if hints else prompt.strip()
-    return f"{head}{body}"
+    return f"{prompt.strip()}\n\n{''.join(hints)}" if hints else prompt
 
 
 def animation_settings(request: ConversationRequest) -> dict[str, int] | None:
-    """output_format=gif 时返回钳位后的动图参数，否则 None（不注入/不后处理）。"""
+    """output_format=gif 时返回钳位后的动图参数（供结果过滤与 Pillow 对齐），否则 None。
+
+    注意：面板不向上游注入任何制作要求前缀——动图意图由调用方在提示词中自然描述。
+    """
     if str(getattr(request, "output_format", "") or "").lower() != "gif":
         return None
     return {
         "frame_count": clamp_frame_count(getattr(request, "frame_count", 0)),
         "frame_duration_ms": clamp_frame_duration(getattr(request, "frame_duration_ms", 0)),
     }
-
-
-def animation_prefix_of(settings: dict[str, int] | None) -> str:
-    if not settings:
-        return ""
-    return animation_prompt_prefix(
-        "gif",
-        settings.get("frame_count") or 0,
-        settings.get("frame_duration_ms") or 0,
-    )
 
 
 def encoding_for_model(model: str):
@@ -787,15 +775,13 @@ def conversation_events(
     thinking_effort: str = "",
     deadline: float | None = None,
     prompt_suffix: str = "",
-    animation_prefix: str = "",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
     history_text = "" if image_model else assistant_history_text(normalized)
     history_messages = [] if image_model else assistant_history_messages(normalized)
     if image_model:
-        final_prompt = prompt_with_global_system(
-            build_image_prompt(prompt, size, quality, animation_prefix=animation_prefix))
+        final_prompt = prompt_with_global_system(build_image_prompt(prompt, size, quality))
         if prompt_suffix:
             final_prompt = f"{final_prompt}\n\n{prompt_suffix}"
     else:
@@ -968,7 +954,6 @@ def stream_image_outputs(
         total: int = 1,
 ) -> Iterator[ImageOutput]:
     animation = animation_settings(request)
-    animation_prefix = animation_prefix_of(animation)
     last: dict[str, Any] = {}
     for event in conversation_events(
             backend,
@@ -979,7 +964,6 @@ def stream_image_outputs(
             quality=request.quality,
             deadline=request.deadline,
             prompt_suffix=request.retry_prompt_suffix or "",
-            animation_prefix=animation_prefix,
     ):
         last = event
         if event.get("type") == "conversation.delta":
