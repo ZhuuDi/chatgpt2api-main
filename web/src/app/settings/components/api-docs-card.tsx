@@ -136,7 +136,7 @@ const docs: ApiDoc[] = [
       ["n", "number", "可选，生成数量，当前限制 1-4。"],
       ["size", "string", "可选，图片尺寸。"],
       ["quality", "string", "可选，默认 auto。"],
-      ["animation", "boolean", "可选，true=对输入图生成动图编辑（官方 API 不支持，本面板独有），面板自动注入动图要求。"],
+      ["animation", "boolean", "可选，true=对输入图生成动图编辑，面板自动注入动图要求。"],
       ["output_format", "string", "可选，设为 gif 等价于 animation=true。"],
       ["frame_count", "number", "可选，动图帧数 2-64。面板写入提示词并在生成后强制精确对齐。"],
       ["frame_duration_ms", "number", "可选，每帧时长 20-2000ms。面板写入提示词并在生成后精确重写播放速度。"],
