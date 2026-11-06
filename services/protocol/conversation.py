@@ -136,6 +136,19 @@ def is_upload_quota_error(message: str) -> bool:
     )
 
 
+def is_payload_too_large_error(exc: object) -> bool:
+    """检测上游 413 请求体过大（多模态 conversation 请求被边缘直接拒绝）。
+
+    该错误与账号无关：同一请求换号必现（2026-11-06 曾连续 28 个账号 413），
+    换号重试只会空耗账号额度并让客户端长时间盲等，应立即向调用方返回
+    明确错误，由调用方缩小参考图/提示词后重试。
+    """
+    status = getattr(exc, "status_code", None)
+    if status == 413:
+        return True
+    return "status=413" in str(exc)
+
+
 def image_stream_error_message(message: str) -> str:
     text = str(message or "")
     if is_token_invalid_error(text):
@@ -1770,6 +1783,22 @@ def _generate_single_image(
                 "error": last_error,
                 "index": index,
             })
+            # 上游 413 请求体过大：与账号无关，换号重试必现，立即返回明确错误
+            if not emitted_for_token and is_payload_too_large_error(exc):
+                logger.warning({
+                    "event": "image_stream_payload_too_large",
+                    "request_token": token,
+                    "account_email": account_email,
+                    "index": index,
+                })
+                raise ImageGenerationError(
+                    "参考图体积过大，请缩小图片后重试",
+                    status_code=413,
+                    error_type="invalid_request_error",
+                    code="upstream_payload_too_large",
+                    account_email=account_email,
+                    conversation_id=getattr(exc, "conversation_id", ""),
+                ) from exc
             if not emitted_for_token and is_token_invalid_error(last_error):
                 backend_pool.invalidate(token)
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
